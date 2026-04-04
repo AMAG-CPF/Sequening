@@ -138,32 +138,30 @@ st.plotly_chart(fig2, use_container_width=True)
 # -------------------------
 # EXPORT
 # -------------------------
+
 st.subheader("📁 Export Report")
 
-data = pd.DataFrame({
-    "Metric": [
-        "Total Gb Required",
-        "Capacity Gb",
-        "Usage %",
-        "Reads Required (M)",
-        "Reads Capacity (M)",
-        "Reads per Sample",
-        "Max Samples"
-    ],
-    "Value": [
-        total_bp/1e9,
-        capacity/1e9,
-        usage_percent,
-        required_reads/1e6,
-        expected_reads/1e6,
-        reads_per_sample,
-        max_samples
-    ]
-})
+report_df = pd.DataFrame([{
+    "Selected_Reagent_Kit": kit,
+    "Coverage_X": coverage,
+    "Parentage_Samples": parentage_samples,
+    "WSSV_Samples": wssv_samples,
+    "Total_Samples": total_samples,
+    "Total_Gb_Required": total_bp/1e9,
+    "Capacity_Gb": capacity/1e9,
+    "Usage_Percent": usage_percent,
+    "Remaining_Gb": remaining_bp/1e9,
+    "Reads_Required_M": required_reads/1e6,
+    "Reads_Capacity_M": expected_reads/1e6,
+    "Reads_per_Sample": reads_per_sample,
+    "Max_Samples": max_samples
+}])
+
+st.dataframe(report_df)
 
 st.download_button(
     "Download CSV",
-    data.to_csv(index=False),
+    report_df.to_csv(index=False),
     file_name="NGS_planning_report.csv",
     mime="text/csv"
 )
