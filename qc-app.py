@@ -16,12 +16,42 @@ st.set_page_config(page_title="NGS QC Dashboard", layout="wide")
 st.title("🧬 NGS QC Dashboard")
 
 
-# =========================================================
-# Database
-# =========================================================
-@st.cache_resource
-def get_engine():
-    return create_engine(st.secrets["DATABASE_URL"])
+# =========================
+# SECURITY
+# =========================
+def check_password():
+    def password_entered():
+        expected = st.secrets["app"]["password"]
+        entered = st.session_state.get("password", "")
+        st.session_state["password_correct"] = hmac.compare_digest(entered, expected)
+
+    if st.session_state.get("password_correct", False):
+        return
+
+    st.title("🔐 NGS QC Dashboard"")
+    st.text_input("App Password", type="password", key="password", on_change=password_entered)
+
+    if "password" in st.session_state and st.session_state["password"] != "":
+        st.error("Incorrect password")
+
+    st.stop()
+
+
+check_password()
+
+
+# =========================
+# DATABASE
+# =========================
+def get_connection():
+    return psycopg2.connect(
+        host=st.secrets["postgres"]["host"],
+        port=st.secrets["postgres"]["port"],
+        dbname=st.secrets["postgres"]["dbname"],
+        user=st.secrets["postgres"]["user"],
+        password=st.secrets["postgres"]["password"],
+        sslmode="require"  
+    )
 
 
 # =========================================================
