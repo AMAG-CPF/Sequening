@@ -1,6 +1,5 @@
 from datetime import datetime
 import hmac
-
 import pandas as pd
 import plotly.graph_objects as go
 import psycopg2
@@ -49,8 +48,8 @@ def get_connection():
         dbname=st.secrets["postgres"]["dbname"],
         user=st.secrets["postgres"]["user"],
         password=st.secrets["postgres"]["password"],
-        sslmode="require"   
-
+        sslmode="require"  
+    )
 
 def insert_run(summary_record: dict, panel_records: list[dict]) -> int:
     conn = get_connection()
