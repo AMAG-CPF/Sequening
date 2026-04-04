@@ -6,115 +6,27 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 from matplotlib.ticker import FuncFormatter
+from sqlalchemy import create_engine, text
 
 
+# =========================================================
+# Streamlit config
+# =========================================================
 st.set_page_config(page_title="NGS QC Dashboard", layout="wide")
-
-
-# ==============================
-# Header
-# ==============================
 st.title("🧬 NGS QC Dashboard")
 
-col_a, col_b, col_c = st.columns(3)
 
-with col_a:
-    project_name_input = st.text_input(
-        "Project Name (default if not in file)",
-        value="NGS_QC_Project"
-    ).strip()
+# =========================================================
+# Database
+# =========================================================
+@st.cache_resource
+def get_engine():
+    return create_engine(st.secrets["DATABASE_URL"])
 
-with col_b:
-    flow_cell_input = st.text_input(
-        "Flow Cell",
-        value=""
-    ).strip()
 
-with col_c:
-    run_date_input = st.text_input(
-        "Run Date (DD/MM/YY, พ.ศ.)",
-        value=""
-    ).strip()
-
-if not project_name_input:
-    project_name_input = "NGS_QC_Project"
-
-date_str = datetime.now().strftime("%Y%m%d")
-
-# ==============================
-# Upload Section
-# ==============================
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    multiqc_file = st.file_uploader("Upload MultiQC TSV", type=["tsv", "txt"])
-
-with col2:
-    fastp_file = st.file_uploader("Upload FASTP TSV", type=["tsv", "txt"])
-
-with col3:
-    flagstat_file = st.file_uploader("Upload Flagstat TSV", type=["tsv", "txt"])
-
-with col4:
-    report_csv_file = st.file_uploader("Upload Total Information CSV", type=["csv", "txt"])
-
-# ==============================
-# Helper Functions
-# ==============================
-import ast
-
-def parse_total_report_csv(uploaded_file):
-    uploaded_file.seek(0)
-
-    result = {
-        "Software Version": "NA",
-        "CycleNumber": "NA",
-        "Read1 Length": "NA",
-        "Read2 Length": "NA",
-        "Index1 Length": "NA",
-        "Index2 Length": "NA",
-        "Read1 Dark Length": "NA",
-        "Read2 Dark Length": "NA",
-        "TotalReads(M)": "NA",
-        "Q30(%)": "NA",
-        "SplitRate(%)": "NA",
-        "Density(um²)": "NA",
-        "R1 Phasing": "NA",
-        "R1 Prephasing": "NA",
-        "R2 Phasing": "NA",
-        "R2 Prephasing": "NA",
-        "MaxOffsetX": "NA",
-        "MaxOffsetY": "NA",
-    }
-
-    try:
-        report_df = pd.read_csv(uploaded_file, dtype=str)
-    except Exception:
-        uploaded_file.seek(0)
-        report_df = pd.read_csv(uploaded_file, sep="\t", dtype=str)
-
-    report_df.columns = [str(c).strip() for c in report_df.columns]
-
-    # รองรับทั้งแบบมี header "Items,Value"
-    if "Items" in report_df.columns and "Value" in report_df.columns:
-        for _, row in report_df.iterrows():
-            key = str(row["Items"]).strip()
-            value = str(row["Value"]).strip()
-            if key in result:
-                result[key] = value
-
-    # รองรับแบบไม่มี header หรือมีแค่ 2 คอลัมน์
-    elif report_df.shape[1] >= 2:
-        tmp = report_df.iloc[:, :2].copy()
-        tmp.columns = ["Items", "Value"]
-        for _, row in tmp.iterrows():
-            key = str(row["Items"]).strip()
-            value = str(row["Value"]).strip()
-            if key in result:
-                result[key] = value
-
-    return result
-
+# =========================================================
+# Helper functions
+# =========================================================
 def clean_sample_name(sample: str) -> str:
     sample = str(sample).strip()
     sample = re.sub(r"\.trimmed$", "", sample)
@@ -191,9 +103,63 @@ def read_fastp_table(uploaded_file) -> pd.DataFrame:
     return fastp[["Sample", "Raw_Reads_Before", "Clean_Reads_After", "Filtering_Rate"]]
 
 
+def parse_total_report_csv(uploaded_file):
+    uploaded_file.seek(0)
+
+    result = {
+        "Software Version": "NA",
+        "CycleNumber": "NA",
+        "Read1 Length": "NA",
+        "Read2 Length": "NA",
+        "Index1 Length": "NA",
+        "Index2 Length": "NA",
+        "Read1 Dark Length": "NA",
+        "Read2 Dark Length": "NA",
+        "TotalReads(M)": "NA",
+        "Q30(%)": "NA",
+        "SplitRate(%)": "NA",
+        "Density(um²)": "NA",
+        "R1 Phasing": "NA",
+        "R1 Prephasing": "NA",
+        "R2 Phasing": "NA",
+        "R2 Prephasing": "NA",
+        "MaxOffsetX": "NA",
+        "MaxOffsetY": "NA",
+    }
+
+    try:
+        report_df = pd.read_csv(uploaded_file, dtype=str)
+    except Exception:
+        uploaded_file.seek(0)
+        report_df = pd.read_csv(uploaded_file, sep="\t", dtype=str)
+
+    report_df.columns = [str(c).strip() for c in report_df.columns]
+
+    if "Items" in report_df.columns and "Value" in report_df.columns:
+        tmp = report_df[["Items", "Value"]].copy()
+    elif report_df.shape[1] >= 2:
+        tmp = report_df.iloc[:, :2].copy()
+        tmp.columns = ["Items", "Value"]
+    else:
+        return result
+
+    for _, row in tmp.iterrows():
+        key = str(row["Items"]).strip()
+        value = str(row["Value"]).strip()
+        if key in result:
+            result[key] = value
+
+    return result
+
+
+def highlight_status(row):
+    if row["QC_Status"] == "Maybe Low Coverage":
+        return ["background-color: #ffe6e6"] * len(row)
+    return ["background-color: #e6ffe6"] * len(row)
+
+
 def make_pdf_report(df_report: pd.DataFrame, project_name: str) -> io.BytesIO:
     buffer = io.BytesIO()
-
     n_rows = len(df_report)
     fig_height = max(3, 1 + 0.45 * (n_rows + 2))
 
@@ -230,171 +196,223 @@ def make_pdf_report(df_report: pd.DataFrame, project_name: str) -> io.BytesIO:
     return buffer
 
 
-def highlight_status(row):
-    if row["QC_Status"] == "Maybe Low Coverage":
-        return ["background-color: #ffe6e6"] * len(row)
-    return ["background-color: #e6ffe6"] * len(row)
+# =========================================================
+# Database functions
+# =========================================================
+def load_projects(engine) -> pd.DataFrame:
+    query = """
+        SELECT DISTINCT project_name
+        FROM runs
+        WHERE project_name IS NOT NULL
+        ORDER BY project_name
+    """
+    return pd.read_sql(query, engine)
 
 
-# ==============================
-# Main Logic
-# ==============================
-if multiqc_file and fastp_file and flagstat_file:
-    multiqc = read_table_flexible(multiqc_file)
-    fastp = read_fastp_table(fastp_file)
-    flagstat = read_table_flexible(flagstat_file)
+def load_runs_by_project(engine, project_name: str) -> pd.DataFrame:
+    query = text("""
+        SELECT id, project_name, flow_cell, run_date_be, created_at
+        FROM runs
+        WHERE project_name = :project_name
+        ORDER BY created_at DESC
+    """)
+    return pd.read_sql(query, engine, params={"project_name": project_name})
 
-    multiqc.columns = [str(c).strip() for c in multiqc.columns]
-    fastp.columns = [str(c).strip() for c in fastp.columns]
-    flagstat.columns = [str(c).strip() for c in flagstat.columns]
 
-    required_multiqc = [
-        "Sample", "% Duplication", "% > Q30", "Mb Q30 bases",
-        "GC content", "% Adapter"
-    ]
-    required_fastp = [
-        "Sample", "Raw_Reads_Before", "Clean_Reads_After", "Filtering_Rate"
-    ]
-    required_flagstat = ["Sample", "Total_Alignments", "Mapped_Reads"]
+def load_sample_qc(engine, run_id: int) -> pd.DataFrame:
+    query = text("""
+        SELECT
+            sample_name AS "Sample",
+            raw_reads_before AS "Raw_Reads_Before",
+            duplication_percent AS "% Duplication",
+            q30_percent AS "% > Q30",
+            mb_q30_bases AS "Mb Q30 bases",
+            gc_content AS "GC content",
+            adapter_percent AS "% Adapter",
+            clean_reads_after AS "Clean_Reads_After",
+            filtering_rate AS "Filtering_Rate",
+            total_alignments AS "Total_Alignments",
+            mapped_reads AS "Mapped_Reads",
+            mapped_reads_percent AS "Mapped_Reads(%)",
+            qc_status AS "QC_Status"
+        FROM sample_qc
+        WHERE run_id = :run_id
+        ORDER BY sample_name
+    """)
+    return pd.read_sql(query, engine, params={"run_id": run_id})
 
-    for col in required_multiqc:
-        if col not in multiqc.columns:
-            st.error(f"Missing column in MultiQC file: {col}")
-            st.stop()
 
-    for col in required_fastp:
-        if col not in fastp.columns:
-            st.error(f"Missing column in FASTP file: {col}")
-            st.stop()
-
-    for col in required_flagstat:
-        if col not in flagstat.columns:
-            st.error(f"Missing column in Flagstat file: {col}")
-            st.stop()
-
-    multiqc["Sample"] = multiqc["Sample"].apply(clean_sample_name)
-    fastp["Sample"] = fastp["Sample"].apply(clean_sample_name)
-    flagstat["Sample"] = flagstat["Sample"].apply(clean_sample_name)
-
-    multiqc = multiqc[required_multiqc].copy()
-    fastp = fastp[required_fastp].copy()
-    flagstat = flagstat[required_flagstat].copy()
-
-    for col in ["% Duplication", "% > Q30", "Mb Q30 bases", "GC content", "% Adapter"]:
-        multiqc[col] = multiqc[col].apply(to_numeric_safe)
-
-    for col in ["Raw_Reads_Before", "Clean_Reads_After", "Filtering_Rate"]:
-        fastp[col] = fastp[col].apply(to_numeric_safe)
-
-    for col in ["Total_Alignments", "Mapped_Reads"]:
-        flagstat[col] = flagstat[col].apply(to_numeric_safe)
-
-    df = multiqc.merge(fastp, on="Sample", how="inner")
-    df = df.merge(flagstat, on="Sample", how="inner")
-
+def load_run_info(engine, run_id: int) -> dict:
+    query = text("""
+        SELECT
+            project_name,
+            flow_cell,
+            run_date_be,
+            software_version,
+            cycle_number,
+            read1_length,
+            read2_length,
+            index1_length,
+            index2_length,
+            total_reads_m,
+            q30_percent,
+            split_rate_percent,
+            density
+        FROM runs
+        WHERE id = :run_id
+    """)
+    df = pd.read_sql(query, engine, params={"run_id": run_id})
     if df.empty:
-        st.error("No matching samples found after merging. Please check sample names in the 3 files.")
-        st.stop()
+        return {}
 
-    df["Mapped_Reads(%)"] = df.apply(
-        lambda row: (row["Mapped_Reads"] / row["Total_Alignments"] * 100)
-        if row["Total_Alignments"] > 0 else 0,
-        axis=1
+    row = df.iloc[0]
+    return {
+        "Project": row.get("project_name", "NA"),
+        "Flow Cell": row.get("flow_cell", "NA"),
+        "Run Date": row.get("run_date_be", "NA"),
+        "Software Version": row.get("software_version", "NA"),
+        "CycleNumber": row.get("cycle_number", "NA"),
+        "Read1 Length": row.get("read1_length", "NA"),
+        "Read2 Length": row.get("read2_length", "NA"),
+        "Index1 Length": row.get("index1_length", "NA"),
+        "Index2 Length": row.get("index2_length", "NA"),
+        "TotalReads(M)": row.get("total_reads_m", "NA"),
+        "Q30(%)": row.get("q30_percent", "NA"),
+        "SplitRate(%)": row.get("split_rate_percent", "NA"),
+        "Density(um²)": row.get("density", "NA"),
+    }
+
+
+def load_target_coverage(engine, run_id: int) -> pd.DataFrame:
+    query = text("""
+        SELECT target_name AS "CHR", sample_name, coverage
+        FROM target_coverage
+        WHERE run_id = :run_id
+    """)
+    long_df = pd.read_sql(query, engine, params={"run_id": run_id})
+    if long_df.empty:
+        return pd.DataFrame()
+
+    wide_df = long_df.pivot(index="CHR", columns="sample_name", values="coverage").reset_index()
+    wide_df.columns.name = None
+    return wide_df
+
+
+def save_run(engine, run_info: dict):
+    query = text("""
+        INSERT INTO runs (
+            project_name, flow_cell, run_date_be,
+            software_version, cycle_number,
+            read1_length, read2_length,
+            index1_length, index2_length,
+            total_reads_m, q30_percent, split_rate_percent, density
+        )
+        VALUES (
+            :project_name, :flow_cell, :run_date_be,
+            :software_version, :cycle_number,
+            :read1_length, :read2_length,
+            :index1_length, :index2_length,
+            :total_reads_m, :q30_percent, :split_rate_percent, :density
+        )
+        RETURNING id
+    """)
+    with engine.begin() as conn:
+        run_id = conn.execute(query, {
+            "project_name": run_info.get("Project"),
+            "flow_cell": run_info.get("Flow Cell"),
+            "run_date_be": run_info.get("Run Date"),
+            "software_version": run_info.get("Software Version"),
+            "cycle_number": pd.to_numeric(run_info.get("CycleNumber"), errors="coerce"),
+            "read1_length": pd.to_numeric(run_info.get("Read1 Length"), errors="coerce"),
+            "read2_length": pd.to_numeric(run_info.get("Read2 Length"), errors="coerce"),
+            "index1_length": pd.to_numeric(run_info.get("Index1 Length"), errors="coerce"),
+            "index2_length": pd.to_numeric(run_info.get("Index2 Length"), errors="coerce"),
+            "total_reads_m": pd.to_numeric(run_info.get("TotalReads(M)"), errors="coerce"),
+            "q30_percent": pd.to_numeric(run_info.get("Q30(%)"), errors="coerce"),
+            "split_rate_percent": pd.to_numeric(run_info.get("SplitRate(%)"), errors="coerce"),
+            "density": pd.to_numeric(run_info.get("Density(um²)"), errors="coerce"),
+        }).scalar()
+    return run_id
+
+
+def save_sample_qc(engine, run_id: int, df: pd.DataFrame):
+    df_to_save = df.copy()
+    df_to_save["run_id"] = run_id
+
+    df_to_save = df_to_save.rename(columns={
+        "Sample": "sample_name",
+        "Raw_Reads_Before": "raw_reads_before",
+        "% Duplication": "duplication_percent",
+        "% > Q30": "q30_percent",
+        "Mb Q30 bases": "mb_q30_bases",
+        "GC content": "gc_content",
+        "% Adapter": "adapter_percent",
+        "Clean_Reads_After": "clean_reads_after",
+        "Filtering_Rate": "filtering_rate",
+        "Total_Alignments": "total_alignments",
+        "Mapped_Reads": "mapped_reads",
+        "Mapped_Reads(%)": "mapped_reads_percent",
+        "QC_Status": "qc_status"
+    })
+
+    cols = [
+        "run_id", "sample_name", "raw_reads_before", "duplication_percent",
+        "q30_percent", "mb_q30_bases", "gc_content", "adapter_percent",
+        "clean_reads_after", "filtering_rate", "total_alignments",
+        "mapped_reads", "mapped_reads_percent", "qc_status"
+    ]
+
+    df_to_save[cols].to_sql("sample_qc", engine, if_exists="append", index=False)
+
+
+def save_target_coverage(engine, run_id: int, coverage_df: pd.DataFrame):
+    long_df = coverage_df.melt(id_vars=["CHR"], var_name="sample_name", value_name="coverage")
+    long_df["run_id"] = run_id
+    long_df = long_df.rename(columns={"CHR": "target_name"})
+    long_df["coverage"] = pd.to_numeric(long_df["coverage"], errors="coerce")
+
+    long_df[["run_id", "sample_name", "target_name", "coverage"]].to_sql(
+        "target_coverage", engine, if_exists="append", index=False
     )
 
-    # ==============================
-    # Project handling
-    # ==============================
-    if "Project" not in df.columns:
-        df["Project"] = project_name_input
 
-    projects = sorted(df["Project"].dropna().unique(), key=natural_sort_key)
+# =========================================================
+# Reusable render functions
+# =========================================================
+def render_run_info(run_info: dict):
+    st.subheader("Run Information")
 
-    selected_project = st.selectbox("Select Project", projects)
-    df = df[df["Project"] == selected_project].copy()
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Project", run_info.get("Project", "NA"))
+    r2.metric("Flow Cell", run_info.get("Flow Cell", "NA"))
+    r3.metric("Run Date", run_info.get("Run Date", "NA"))
 
-    st.markdown(f"### 📁 Project: {selected_project}")
+    r4, r5, r6, r7 = st.columns(4)
+    r4.metric("TotalReads(M)", run_info.get("TotalReads(M)", "NA"))
+    r5.metric("Q30(%)", run_info.get("Q30(%)", "NA"))
+    r6.metric("SplitRate(%)", run_info.get("SplitRate(%)", "NA"))
+    r7.metric("Density(um²)", run_info.get("Density(um²)", "NA"))
 
-# ==============================
-# Run Information
-# ==============================
-st.subheader("Run Information")
+    with st.expander("Show full run information"):
+        run_info_df = pd.DataFrame({
+            "Field": list(run_info.keys()),
+            "Value": list(run_info.values())
+        })
+        st.table(run_info_df)
 
-run_info = {
-    "Project": selected_project,
-    "Flow Cell": flow_cell_input if flow_cell_input else "NA",
-    "Run Date": run_date_input if run_date_input else "NA",
-    "Software Version": "NA",
-    "CycleNumber": "NA",
-    "Read1 Length": "NA",
-    "Read2 Length": "NA",
-    "Index1 Length": "NA",
-    "Index2 Length": "NA",
-    "Read1 Dark Length": "NA",
-    "Read2 Dark Length": "NA",
-    "TotalReads(M)": "NA",
-    "Q30(%)": "NA",
-    "SplitRate(%)": "NA",
-    "Density(um²)": "NA",
-    "R1 Phasing": "NA",
-    "R1 Prephasing": "NA",
-    "R2 Phasing": "NA",
-    "R2 Prephasing": "NA",
-    "MaxOffsetX": "NA",
-    "MaxOffsetY": "NA",
-}
 
-if report_csv_file is not None:
-    parsed_info = parse_total_report_csv(report_csv_file)
-    run_info.update(parsed_info)
+def render_sample_qc(df: pd.DataFrame):
+    if df.empty:
+        st.warning("No sample QC data found.")
+        return
 
-r1, r2, r3 = st.columns(3)
-r1.metric("Project", run_info["Project"])
-r2.metric("Flow Cell", run_info["Flow Cell"])
-r3.metric("Run Date", run_info["Run Date"])
+    df = df.copy()
+    if "QC_Status" not in df.columns and "Mapped_Reads" in df.columns:
+        df["QC_Status"] = df["Mapped_Reads"].apply(qc_status)
 
-r4, r5, r6, r7 = st.columns(4)
-r4.metric("TotalReads(M)", run_info["TotalReads(M)"])
-r5.metric("Q30(%)", run_info["Q30(%)"])
-r6.metric("SplitRate(%)", run_info["SplitRate(%)"])
-r7.metric("Density(um²)", run_info["Density(um²)"])
+    if "Sample" in df.columns:
+        df = smart_sort(df)
 
-with st.expander("Show full run information"):
-    run_info_df = pd.DataFrame({
-        "Field": list(run_info.keys()),
-        "Value": list(run_info.values())
-    })
-    st.table(run_info_df)
-
-    # ==============================
-    # QC and arrangement
-    # ==============================
-    df["QC_Status"] = df["Mapped_Reads"].apply(qc_status)
-
-    df = df[
-        [
-            "Sample",
-            "Raw_Reads_Before",
-            "% Duplication",
-            "% > Q30",
-            "Mb Q30 bases",
-            "GC content",
-            "% Adapter",
-            "Clean_Reads_After",
-            "Filtering_Rate",
-            "Total_Alignments",
-            "Mapped_Reads",
-            "Mapped_Reads(%)",
-            "QC_Status",
-            "Project",
-        ]
-    ]
-
-    df = smart_sort(df)
-
-    # ==============================
-    # Summary
-    # ==============================
     total_samples = len(df)
     pass_samples = (df["QC_Status"] == "Pass").sum()
     low_samples_n = (df["QC_Status"] == "Maybe Low Coverage").sum()
@@ -405,21 +423,21 @@ with st.expander("Show full run information"):
     c2.metric("Pass", int(pass_samples))
     c3.metric("Maybe Low Coverage", int(low_samples_n))
 
-    # ==============================
-    # QC Highlight Table
-    # ==============================
     st.subheader("QC Status Table")
 
     df_display = df.copy()
 
-    percent_cols = ["% Duplication", "% > Q30", "GC content", "% Adapter", "Mapped_Reads(%)"]
+    percent_cols = [c for c in ["% Duplication", "% > Q30", "GC content", "% Adapter", "Mapped_Reads(%)"] if c in df_display.columns]
     for col in percent_cols:
-        df_display[col] = df_display[col].map(lambda x: f"{x:.2f}")
+        df_display[col] = df_display[col].map(lambda x: f"{to_numeric_safe(x):.2f}")
 
-    df_display["Mb Q30 bases"] = df_display["Mb Q30 bases"].map(lambda x: f"{x:.3f}")
-    df_display["Filtering_Rate"] = df_display["Filtering_Rate"].map(lambda x: f"{x:.2f}%")
+    if "Mb Q30 bases" in df_display.columns:
+        df_display["Mb Q30 bases"] = df_display["Mb Q30 bases"].map(lambda x: f"{to_numeric_safe(x):.3f}")
 
-    read_cols = ["Raw_Reads_Before", "Clean_Reads_After", "Total_Alignments", "Mapped_Reads"]
+    if "Filtering_Rate" in df_display.columns:
+        df_display["Filtering_Rate"] = df_display["Filtering_Rate"].map(lambda x: f"{to_numeric_safe(x):.2f}%")
+
+    read_cols = [c for c in ["Raw_Reads_Before", "Clean_Reads_After", "Total_Alignments", "Mapped_Reads"] if c in df_display.columns]
     for col in read_cols:
         df_display[col] = df_display[col].apply(format_reads)
 
@@ -428,94 +446,428 @@ with st.expander("Show full run information"):
         use_container_width=True
     )
 
-    # ==============================
-    # Plot with threshold line
-    # ==============================
-    st.subheader("Reads Distribution")
+    if {"Clean_Reads_After", "Mapped_Reads", "Sample"}.issubset(df.columns):
+        st.subheader("Reads Distribution")
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+        fig, ax = plt.subplots(figsize=(12, 5))
+        plot_df = df.copy()
+        x = range(len(plot_df))
 
-    plot_df = df.copy()
-    x = range(len(plot_df))
+        ax.bar(
+            [i - 0.2 for i in x],
+            plot_df["Clean_Reads_After"].apply(to_numeric_safe),
+            width=0.4,
+            label="Clean Reads"
+        )
+        ax.bar(
+            [i + 0.2 for i in x],
+            plot_df["Mapped_Reads"].apply(to_numeric_safe),
+            width=0.4,
+            label="Mapped Reads"
+        )
 
-    ax.bar(
-        [i - 0.2 for i in x],
-        plot_df["Clean_Reads_After"],
-        width=0.4,
-        label="Clean Reads"
-    )
-    ax.bar(
-        [i + 0.2 for i in x],
-        plot_df["Mapped_Reads"],
-        width=0.4,
-        label="Mapped Reads"
-    )
+        ax.axhline(10000, linestyle="--", linewidth=1.5, label="Threshold = 10,000")
+        ax.set_xticks(list(x))
+        ax.set_xticklabels(plot_df["Sample"], rotation=45, ha="right")
+        ax.set_ylabel("Reads")
+        ax.set_title("Clean Reads and Mapped Reads by Sample")
+        ax.legend()
 
-    ax.axhline(10000, linestyle="--", linewidth=1.5, label="Threshold = 10,000")
+        ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda y, _: f"{y/1000:.0f}k" if y >= 1000 else f"{int(y)}")
+        )
 
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(plot_df["Sample"], rotation=45, ha="right")
-    ax.set_ylabel("Reads")
-    ax.set_title("Clean Reads and Mapped Reads by Sample")
-    ax.legend()
+        fig.tight_layout()
+        st.pyplot(fig)
 
-    ax.yaxis.set_major_formatter(
-        FuncFormatter(lambda y, _: f"{y/1000:.0f}k" if y >= 1000 else f"{int(y)}")
-    )
-
-    fig.tight_layout()
-    st.pyplot(fig)
-
-    # ==============================
-    # Flagged samples
-    # ==============================
     low_samples = df[df["QC_Status"] == "Maybe Low Coverage"].copy()
-
     if len(low_samples) > 0:
         st.subheader("Flagged Samples")
         low_display = low_samples[["Sample", "Clean_Reads_After", "Mapped_Reads", "QC_Status"]].copy()
-        low_display["Clean_Reads_After"] = low_display["Clean_Reads_After"].apply(format_reads)
-        low_display["Mapped_Reads"] = low_display["Mapped_Reads"].apply(format_reads)
+        if "Clean_Reads_After" in low_display.columns:
+            low_display["Clean_Reads_After"] = low_display["Clean_Reads_After"].apply(format_reads)
+        if "Mapped_Reads" in low_display.columns:
+            low_display["Mapped_Reads"] = low_display["Mapped_Reads"].apply(format_reads)
         st.dataframe(low_display, use_container_width=True)
     else:
         st.success("All samples passed the minimum mapped reads threshold.")
 
-    # ==============================
-    # Export
-    # ==============================
-    st.subheader("Export QC Report")
 
-    csv_filename = f"{selected_project}_{date_str}_qc_report.csv"
-    pdf_filename = f"{selected_project}_{date_str}_qc_report.pdf"
+def render_coverage_module(coverage_df: pd.DataFrame):
+    if coverage_df is None or coverage_df.empty:
+        return
 
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
+    st.subheader("Coverage Analysis")
 
-    st.download_button(
-        label="Download QC Report (CSV)",
-        data=csv_buffer.getvalue(),
-        file_name=csv_filename,
-        mime="text/csv",
+    coverage_df = coverage_df.copy()
+    coverage_df.columns = [str(c).strip() for c in coverage_df.columns]
+
+    if "CHR" not in coverage_df.columns:
+        st.warning("Coverage file/table must contain 'CHR' column.")
+        return
+
+    samples = [c for c in coverage_df.columns if c != "CHR"]
+    if not samples:
+        st.warning("No sample columns found in coverage data.")
+        return
+
+    c1, c2 = st.columns(2)
+    with c1:
+        selected_sample = st.selectbox("Select Sample", samples, key="coverage_sample")
+    with c2:
+        expected_targets = st.number_input(
+            "Expected number of targets",
+            min_value=1,
+            value=len(coverage_df),
+            step=1,
+            key="expected_targets"
+        )
+
+    threshold = st.number_input(
+        "Coverage threshold",
+        min_value=0,
+        value=100,
+        step=1,
+        key="coverage_threshold"
     )
 
-    pdf_df = df.copy()
-    for col in ["Raw_Reads_Before", "Clean_Reads_After", "Total_Alignments", "Mapped_Reads"]:
-        pdf_df[col] = pdf_df[col].apply(format_reads)
+    plot_df = coverage_df[["CHR", selected_sample]].copy()
+    plot_df[selected_sample] = pd.to_numeric(plot_df[selected_sample], errors="coerce").fillna(0)
 
-    for col in ["% Duplication", "% > Q30", "GC content", "% Adapter", "Mapped_Reads(%)"]:
-        pdf_df[col] = pdf_df[col].map(lambda x: f"{x:.2f}")
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.bar(range(len(plot_df)), plot_df[selected_sample])
+    ax.axhline(threshold, linestyle="--", label=f"Threshold = {threshold}")
+    ax.set_title(f"Coverage per Target ({selected_sample})")
+    ax.set_xlabel("Targets")
+    ax.set_ylabel("Reads")
+    ax.set_xticks([])
+    ax.legend()
+    st.pyplot(fig)
 
-    pdf_df["Mb Q30 bases"] = pdf_df["Mb Q30 bases"].map(lambda x: f"{x:.3f}")
-    pdf_df["Filtering_Rate"] = pdf_df["Filtering_Rate"].map(lambda x: f"{x:.2f}%")
+    low_targets = plot_df[plot_df[selected_sample] < threshold].copy()
 
-    pdf_bytes = make_pdf_report(
-        pdf_df[["Sample", "Clean_Reads_After", "Mapped_Reads", "Mapped_Reads(%)", "QC_Status"]],
-        project_name=selected_project
+    st.subheader("Coverage Summary")
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Expected Targets", int(expected_targets))
+    s2.metric("Detected Targets", int(len(plot_df) - len(low_targets)))
+    s3.metric("Low Coverage Targets", int(len(low_targets)))
+
+    if len(low_targets) > 0:
+        st.subheader("Low Coverage Targets")
+        st.dataframe(low_targets, use_container_width=True)
+
+    st.subheader("All Samples Summary")
+    summary = []
+    for sample in samples:
+        tmp = coverage_df[["CHR", sample]].copy()
+        tmp[sample] = pd.to_numeric(tmp[sample], errors="coerce").fillna(0)
+        low = int((tmp[sample] < threshold).sum())
+        summary.append({
+            "Sample": sample,
+            "Low_Targets": low,
+            "Detected_Targets": int(len(tmp) - low),
+            "Expected_Targets": int(expected_targets),
+            "Status": "OK" if low == 0 else "Missing Targets"
+        })
+
+    summary_df = pd.DataFrame(summary)
+    summary_df = summary_df.sort_values("Sample", key=lambda s: s.map(natural_sort_key)).reset_index(drop=True)
+    st.dataframe(summary_df, use_container_width=True)
+
+
+# =========================================================
+# Tabs
+# =========================================================
+tab1, tab2 = st.tabs(["Upload & Analyze", "Browse Neon Database"])
+
+
+# =========================================================
+# TAB 1: Upload & Analyze
+# =========================================================
+with tab1:
+    st.subheader("Input Information")
+
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        project_name_input = st.text_input("Project Name", value="NGS_QC_Project").strip()
+    with h2:
+        flow_cell_input = st.text_input("Flow Cell", value="").strip()
+    with h3:
+        run_date_input = st.text_input("Run Date (DD/MM/YY, พ.ศ.)", value="").strip()
+
+    if not project_name_input:
+        project_name_input = "NGS_QC_Project"
+
+    date_str = datetime.now().strftime("%Y%m%d")
+
+    st.subheader("Upload Files")
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    with col1:
+        multiqc_file = st.file_uploader("MultiQC TSV", type=["tsv", "txt"], key="multiqc_file")
+
+    with col2:
+        fastp_file = st.file_uploader("FASTP TSV", type=["tsv", "txt"], key="fastp_file")
+
+    with col3:
+        flagstat_file = st.file_uploader("Flagstat TSV", type=["tsv", "txt"], key="flagstat_file")
+
+    with col4:
+        report_csv_file = st.file_uploader("Total Information CSV", type=["csv", "txt"], key="report_csv_file")
+
+    with col5:
+        coverage_file = st.file_uploader("Coverage TSV", type=["tsv", "txt"], key="coverage_file")
+
+    coverage_df = None
+
+    if multiqc_file and fastp_file and flagstat_file:
+        multiqc = read_table_flexible(multiqc_file)
+        fastp = read_fastp_table(fastp_file)
+        flagstat = read_table_flexible(flagstat_file)
+
+        multiqc.columns = [str(c).strip() for c in multiqc.columns]
+        fastp.columns = [str(c).strip() for c in fastp.columns]
+        flagstat.columns = [str(c).strip() for c in flagstat.columns]
+
+        required_multiqc = [
+            "Sample", "% Duplication", "% > Q30", "Mb Q30 bases",
+            "GC content", "% Adapter"
+        ]
+        required_fastp = [
+            "Sample", "Raw_Reads_Before", "Clean_Reads_After", "Filtering_Rate"
+        ]
+        required_flagstat = ["Sample", "Total_Alignments", "Mapped_Reads"]
+
+        for col in required_multiqc:
+            if col not in multiqc.columns:
+                st.error(f"Missing column in MultiQC file: {col}")
+                st.stop()
+
+        for col in required_fastp:
+            if col not in fastp.columns:
+                st.error(f"Missing column in FASTP file: {col}")
+                st.stop()
+
+        for col in required_flagstat:
+            if col not in flagstat.columns:
+                st.error(f"Missing column in Flagstat file: {col}")
+                st.stop()
+
+        multiqc["Sample"] = multiqc["Sample"].apply(clean_sample_name)
+        fastp["Sample"] = fastp["Sample"].apply(clean_sample_name)
+        flagstat["Sample"] = flagstat["Sample"].apply(clean_sample_name)
+
+        multiqc = multiqc[required_multiqc].copy()
+        fastp = fastp[required_fastp].copy()
+        flagstat = flagstat[required_flagstat].copy()
+
+        for col in ["% Duplication", "% > Q30", "Mb Q30 bases", "GC content", "% Adapter"]:
+            multiqc[col] = multiqc[col].apply(to_numeric_safe)
+
+        for col in ["Raw_Reads_Before", "Clean_Reads_After", "Filtering_Rate"]:
+            fastp[col] = fastp[col].apply(to_numeric_safe)
+
+        for col in ["Total_Alignments", "Mapped_Reads"]:
+            flagstat[col] = flagstat[col].apply(to_numeric_safe)
+
+        df = multiqc.merge(fastp, on="Sample", how="inner")
+        df = df.merge(flagstat, on="Sample", how="inner")
+
+        if df.empty:
+            st.error("No matching samples found after merging. Please check sample names in the 3 files.")
+            st.stop()
+
+        df["Mapped_Reads(%)"] = df.apply(
+            lambda row: (row["Mapped_Reads"] / row["Total_Alignments"] * 100)
+            if row["Total_Alignments"] > 0 else 0,
+            axis=1
+        )
+
+        df["QC_Status"] = df["Mapped_Reads"].apply(qc_status)
+        df["Project"] = project_name_input
+
+        df = df[
+            [
+                "Sample",
+                "Raw_Reads_Before",
+                "% Duplication",
+                "% > Q30",
+                "Mb Q30 bases",
+                "GC content",
+                "% Adapter",
+                "Clean_Reads_After",
+                "Filtering_Rate",
+                "Total_Alignments",
+                "Mapped_Reads",
+                "Mapped_Reads(%)",
+                "QC_Status",
+                "Project",
+            ]
+        ]
+
+        df = smart_sort(df)
+
+        run_info = {
+            "Project": project_name_input,
+            "Flow Cell": flow_cell_input if flow_cell_input else "NA",
+            "Run Date": run_date_input if run_date_input else "NA",
+            "Software Version": "NA",
+            "CycleNumber": "NA",
+            "Read1 Length": "NA",
+            "Read2 Length": "NA",
+            "Index1 Length": "NA",
+            "Index2 Length": "NA",
+            "Read1 Dark Length": "NA",
+            "Read2 Dark Length": "NA",
+            "TotalReads(M)": "NA",
+            "Q30(%)": "NA",
+            "SplitRate(%)": "NA",
+            "Density(um²)": "NA",
+            "R1 Phasing": "NA",
+            "R1 Prephasing": "NA",
+            "R2 Phasing": "NA",
+            "R2 Prephasing": "NA",
+            "MaxOffsetX": "NA",
+            "MaxOffsetY": "NA",
+        }
+
+        if report_csv_file is not None:
+            parsed_info = parse_total_report_csv(report_csv_file)
+            run_info.update(parsed_info)
+
+        render_run_info(run_info)
+        render_sample_qc(df)
+
+        if coverage_file is not None:
+            coverage_df = pd.read_csv(coverage_file, sep="\t")
+            render_coverage_module(coverage_df)
+
+        st.subheader("Export QC Report")
+
+        csv_filename = f"{project_name_input}_{date_str}_qc_report.csv"
+        pdf_filename = f"{project_name_input}_{date_str}_qc_report.pdf"
+
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+
+        st.download_button(
+            label="Download QC Report (CSV)",
+            data=csv_buffer.getvalue(),
+            file_name=csv_filename,
+            mime="text/csv",
+        )
+
+        pdf_df = df.copy()
+        for col in ["Raw_Reads_Before", "Clean_Reads_After", "Total_Alignments", "Mapped_Reads"]:
+            pdf_df[col] = pdf_df[col].apply(format_reads)
+
+        for col in ["% Duplication", "% > Q30", "GC content", "% Adapter", "Mapped_Reads(%)"]:
+            pdf_df[col] = pdf_df[col].map(lambda x: f"{to_numeric_safe(x):.2f}")
+
+        pdf_df["Mb Q30 bases"] = pdf_df["Mb Q30 bases"].map(lambda x: f"{to_numeric_safe(x):.3f}")
+        pdf_df["Filtering_Rate"] = pdf_df["Filtering_Rate"].map(lambda x: f"{to_numeric_safe(x):.2f}%")
+
+        pdf_bytes = make_pdf_report(
+            pdf_df[["Sample", "Clean_Reads_After", "Mapped_Reads", "Mapped_Reads(%)", "QC_Status"]],
+            project_name=project_name_input
+        )
+
+        st.download_button(
+            label="Download QC Report (PDF)",
+            data=pdf_bytes,
+            file_name=pdf_filename,
+            mime="application/pdf",
+        )
+
+        st.subheader("Save to Neon Database")
+        engine = get_engine()
+
+        if st.button("Save Current Run to Neon"):
+            try:
+                run_id = save_run(engine, run_info)
+                save_sample_qc(engine, run_id, df)
+
+                if coverage_df is not None and not coverage_df.empty:
+                    save_target_coverage(engine, run_id, coverage_df)
+
+                st.success(f"Saved successfully. Run ID: {run_id}")
+            except Exception as e:
+                st.error(f"Failed to save to database: {e}")
+    else:
+        st.info("Please upload MultiQC, FASTP, and Flagstat files to begin.")
+
+
+# =========================================================
+# TAB 2: Browse Neon Database
+# =========================================================
+with tab2:
+    st.subheader("Project Selection")
+
+    try:
+        engine = get_engine()
+        project_df = load_projects(engine)
+    except Exception as e:
+        st.error(f"Cannot connect to Neon database: {e}")
+        st.stop()
+
+    s1, s2 = st.columns([3, 1])
+    with s1:
+        project_search = st.text_input("Search Project", value="")
+    with s2:
+        search_clicked = st.button("Search")
+
+    if search_clicked:
+        st.session_state["project_search_value"] = project_search
+
+    search_value = st.session_state.get("project_search_value", project_search)
+
+    if search_value.strip():
+        filtered_projects = project_df[
+            project_df["project_name"].str.contains(search_value, case=False, na=False)
+        ].copy()
+    else:
+        filtered_projects = project_df.copy()
+
+    project_options = filtered_projects["project_name"].dropna().tolist()
+
+    if len(project_options) == 0:
+        st.warning("No matching project found.")
+        st.stop()
+
+    selected_project = st.selectbox(
+        "Select Project",
+        project_options,
+        key="db_selected_project"
     )
 
-    st.download_button(
-        label="Download QC Report (PDF)",
-        data=pdf_bytes,
-        file_name=pdf_filename,
-        mime="application/pdf",
+    run_df = load_runs_by_project(engine, selected_project)
+
+    if run_df.empty:
+        st.warning("No runs found for this project.")
+        st.stop()
+
+    run_df["run_label"] = (
+        run_df["flow_cell"].fillna("NA").astype(str) + " | " +
+        run_df["run_date_be"].fillna("NA").astype(str) + " | Run ID: " +
+        run_df["id"].astype(str)
     )
+
+    selected_run_label = st.selectbox(
+        "Select Run",
+        run_df["run_label"].tolist(),
+        key="db_selected_run"
+    )
+
+    selected_run_id = int(
+        run_df.loc[run_df["run_label"] == selected_run_label, "id"].iloc[0]
+    )
+
+    run_info = load_run_info(engine, selected_run_id)
+    sample_qc_df = load_sample_qc(engine, selected_run_id)
+    coverage_df_db = load_target_coverage(engine, selected_run_id)
+
+    render_run_info(run_info)
+    render_sample_qc(sample_qc_df)
+
+    if not coverage_df_db.empty:
+        render_coverage_module(coverage_df_db)
