@@ -49,7 +49,7 @@ def get_connection():
         dbname=st.secrets["postgres"]["dbname"],
         user=st.secrets["postgres"]["user"],
         password=st.secrets["postgres"]["password"],
-    )
+        sslmode="require"   
 
 
 def insert_run(summary_record: dict, panel_records: list[dict]) -> int:
