@@ -40,7 +40,6 @@ check_password()
 # =========================
 # DATABASE
 # =========================
-@st.cache_resource
 def get_connection():
     return psycopg2.connect(
         host=st.secrets["postgres"]["host"],
