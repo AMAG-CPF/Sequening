@@ -1,23 +1,56 @@
-import io
-import re
 from datetime import datetime
-import matplotlib.pyplot as plt
-import pandas as pd
-import streamlit as st
-from matplotlib.ticker import FuncFormatter
-import psycopg2
-import pandas as pd
-from psycopg2.extras import RealDictCursor
+import hmac
 
+import pandas as pd
+import plotly.graph_objects as go
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import streamlit as st
+
+
+# =========================
+# PAGE CONFIG
+# =========================
+st.set_page_config(page_title="NGS Capacity Planner", layout="wide")
+
+
+# =========================
+# SECURITY
+# =========================
+def check_password():
+    def password_entered():
+        expected = st.secrets["app"]["password"]
+        entered = st.session_state.get("password", "")
+        st.session_state["password_correct"] = hmac.compare_digest(entered, expected)
+
+    if st.session_state.get("password_correct", False):
+        return
+
+    st.title("🔐 NGS Capacity Planner")
+    st.text_input("App Password", type="password", key="password", on_change=password_entered)
+
+    if "password" in st.session_state and st.session_state["password"] != "":
+        st.error("Incorrect password")
+
+    st.stop()
+
+
+check_password()
+
+
+# =========================
+# DATABASE
+# =========================
 @st.cache_resource
 def get_connection():
     return psycopg2.connect(
-        host="localhost",
-        port=5432,
-        dbname="sequencing_app",
-        user="postgres",
-        password="AMAG"
+        host=st.secrets["postgres"]["host"],
+        port=st.secrets["postgres"]["port"],
+        dbname=st.secrets["postgres"]["dbname"],
+        user=st.secrets["postgres"]["user"],
+        password=st.secrets["postgres"]["password"],
     )
+
 
 def insert_run(summary_record: dict, panel_records: list[dict]) -> int:
     conn = get_connection()
@@ -27,6 +60,7 @@ def insert_run(summary_record: dict, panel_records: list[dict]) -> int:
                 """
                 INSERT INTO sequencing_runs (
                     run_date,
+                    project_name,
                     reagent_kit,
                     reagent_kit_label,
                     coverage_x,
@@ -49,6 +83,7 @@ def insert_run(summary_record: dict, panel_records: list[dict]) -> int:
                 )
                 VALUES (
                     %(run_date)s,
+                    %(project_name)s,
                     %(reagent_kit)s,
                     %(reagent_kit_label)s,
                     %(coverage_x)s,
@@ -103,6 +138,7 @@ def insert_run(summary_record: dict, panel_records: list[dict]) -> int:
 
     return run_id
 
+
 def load_run_history(limit=100):
     conn = get_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -110,22 +146,17 @@ def load_run_history(limit=100):
             """
             SELECT
                 id,
+                project_name,
                 run_date,
                 reagent_kit,
-                reagent_kit_label,
                 coverage_x,
-                total_panels,
                 total_samples,
                 total_gb_required,
-                capacity_gb,
                 usage_percent,
-                remaining_gb,
                 reads_required_m,
-                reads_capacity_m,
-                reads_per_sample,
-                max_samples,
-                notes
+                max_samples
             FROM sequencing_runs
+            WHERE COALESCE(is_deleted, FALSE) = FALSE
             ORDER BY run_date DESC
             LIMIT %s
             """,
@@ -134,6 +165,7 @@ def load_run_history(limit=100):
         rows = cur.fetchall()
     return pd.DataFrame(rows)
 
+
 def load_panel_history(limit=500):
     conn = get_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -141,6 +173,7 @@ def load_panel_history(limit=500):
             """
             SELECT
                 r.id AS run_id,
+                r.project_name,
                 r.run_date,
                 r.reagent_kit,
                 r.coverage_x,
@@ -151,6 +184,7 @@ def load_panel_history(limit=500):
             FROM sequencing_runs r
             JOIN sequencing_run_panels p
               ON r.id = p.run_id
+            WHERE COALESCE(r.is_deleted, FALSE) = FALSE
             ORDER BY r.run_date DESC, p.id ASC
             LIMIT %s
             """,
@@ -160,39 +194,167 @@ def load_panel_history(limit=500):
     return pd.DataFrame(rows)
 
 
-st.set_page_config(page_title="NGS Capacity Planner", layout="wide")
-st.subheader("📚 Historical Runs")
+def soft_delete_run(run_id: int):
+    conn = get_connection()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sequencing_runs
+                SET is_deleted = TRUE
+                WHERE id = %s
+                """,
+                (run_id,)
+            )
+
+
+# =========================
+# CONSTANTS
+# =========================
 READ_LENGTH_BP = 300  # PE150
 
 KIT_OPTIONS = {
     "25M": {"capacity_bp": 7.5e9, "label": "25M (7.5 Gb)"},
-    "60M": {"capacity_bp": 18e9, "label": "60M (18 Gb)"}
+    "60M": {"capacity_bp": 18e9, "label": "60M (18 Gb)"},
 }
 
 PRESET_PANELS = {
     "Parentage": 30645,
-    "WSSV": 10603
+    "WSSV": 10603,
 }
 
-# -------------------------
-# session state for custom panels
-# -------------------------
+
+# =========================
+# SESSION STATE
+# =========================
 if "custom_panels" not in st.session_state:
     st.session_state.custom_panels = []
+
+if "confirm_delete_run_id" not in st.session_state:
+    st.session_state.confirm_delete_run_id = None
+
 
 def add_custom_panel():
     st.session_state.custom_panels.append({
         "name": "",
         "size_bp": 0,
-        "samples": 0
+        "samples": 0,
     })
+
+
 def remove_custom_panel(index: int):
-    st.session_state.custom_panels.pop(index)
+    if 0 <= index < len(st.session_state.custom_panels):
+        st.session_state.custom_panels.pop(index)
+
+
+# =========================
+# TITLE
+# =========================
 st.title(":material/home: NGS Capacity Planner")
 
-# -------------------------
-# HISTORY placeholder
-# -------------------------
+
+# =========================
+# HISTORICAL RUNS
+# =========================
+st.subheader("📚 Historical Runs")
+
+try:
+    history_df = load_run_history(limit=200)
+except Exception as e:
+    st.error(f"Failed to load run history: {e}")
+    history_df = pd.DataFrame()
+
+if not history_df.empty:
+    history_display = history_df.copy()
+    history_display["run_date"] = pd.to_datetime(
+        history_display["run_date"]
+    ).dt.strftime("%m/%d/%Y %H:%M")
+
+    history_display = history_display.rename(columns={
+        "project_name": "Project Name",
+        "run_date": "Run Date",
+        "reagent_kit": "Reagent Kit",
+        "coverage_x": "Coverage (X)",
+        "total_samples": "Total Samples",
+        "total_gb_required": "Total Gb Required",
+        "usage_percent": "Usage (%)",
+        "reads_required_m": "Reads Required (M)",
+        "max_samples": "Max Samples",
+    })
+
+    st.dataframe(history_display, use_container_width=True)
+
+    st.download_button(
+        "Download Run History CSV",
+        history_df.to_csv(index=False),
+        file_name="sequencing_run_history.csv",
+        mime="text/csv",
+    )
+else:
+    st.info("No saved run history yet.")
+
+with st.expander("Show panel history"):
+    try:
+        panel_history_df = load_panel_history(limit=500)
+    except Exception as e:
+        st.error(f"Failed to load panel history: {e}")
+        panel_history_df = pd.DataFrame()
+
+    if not panel_history_df.empty:
+        panel_history_display = panel_history_df.copy()
+        panel_history_display["run_date"] = pd.to_datetime(
+            panel_history_display["run_date"]
+        ).dt.strftime("%m/%d/%Y %H:%M")
+        st.dataframe(panel_history_display, use_container_width=True)
+    else:
+        st.info("No saved panel history yet.")
+
+
+# =========================
+# MANAGE RUNS
+# =========================
+with st.expander("🗑️ Manage Historical Runs"):
+    if history_df.empty:
+        st.info("No runs available to delete.")
+    else:
+        delete_options = history_df[["id", "project_name", "run_date", "reagent_kit"]].copy()
+        delete_options["label"] = delete_options.apply(
+            lambda x: f"Run ID {x['id']} | {x['project_name']} | {pd.to_datetime(x['run_date']).strftime('%m/%d/%Y %H:%M')} | {x['reagent_kit']}",
+            axis=1
+        )
+
+        selected_delete_label = st.selectbox(
+            "Select a run to delete",
+            options=delete_options["label"].tolist()
+        )
+
+        selected_run_id = int(
+            delete_options.loc[delete_options["label"] == selected_delete_label, "id"].iloc[0]
+        )
+
+        cdel1, cdel2 = st.columns([1, 1])
+
+        with cdel1:
+            if st.button("Prepare Delete", type="secondary"):
+                st.session_state.confirm_delete_run_id = selected_run_id
+
+        with cdel2:
+            if (
+                st.session_state.confirm_delete_run_id == selected_run_id
+                and st.button("Confirm Soft Delete", type="primary")
+            ):
+                try:
+                    soft_delete_run(selected_run_id)
+                    st.success(f"Run ID {selected_run_id} has been deleted.")
+                    st.session_state.confirm_delete_run_id = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to delete run: {e}")
+
+
+# =========================
+# CURRENT RUN SETUP
+# =========================
 st.subheader("⚙️ Current Run Setup")
 
 col1, col2 = st.columns(2)
@@ -201,19 +363,30 @@ with col1:
         "Select Reagent Kit",
         options=list(KIT_OPTIONS.keys()),
         format_func=lambda x: KIT_OPTIONS[x]["label"],
-        horizontal=True
+        horizontal=True,
     )
-with col2:
-    coverage = st.number_input("Coverage (X)", min_value=1, max_value=1000, value=20, step=1)
 
-notes = st.text_input("Notes / Project name", value="")
+with col2:
+    coverage = st.number_input(
+        "Coverage (X)",
+        min_value=1,
+        max_value=1000,
+        value=20,
+        step=1,
+    )
+
+project_name = st.text_input("Project Name", value="").strip()
+notes = project_name
 
 st.markdown("### Preset Panels")
 
 selected_panels = []
 
 for panel_name, panel_size in PRESET_PANELS.items():
-    use_panel = st.checkbox(f"Use {panel_name} ({panel_size:,} bp)", value=(panel_name in ["Parentage", "WSSV"]))
+    use_panel = st.checkbox(
+        f"Use {panel_name} ({panel_size:,} bp)",
+        value=(panel_name in ["Parentage", "WSSV"]),
+    )
     if use_panel:
         c1, c2 = st.columns([2, 1])
         with c1:
@@ -223,7 +396,7 @@ for panel_name, panel_size in PRESET_PANELS.items():
                 max_value=100000,
                 value=300 if panel_name == "Parentage" else 200,
                 step=1,
-                key=f"{panel_name}_samples"
+                key=f"{panel_name}_samples",
             )
         with c2:
             st.number_input(
@@ -232,14 +405,15 @@ for panel_name, panel_size in PRESET_PANELS.items():
                 value=panel_size,
                 step=1,
                 key=f"{panel_name}_size",
-                disabled=True
+                disabled=True,
             )
 
-        selected_panels.append({
-            "panel_name": panel_name,
-            "panel_size_bp": panel_size,
-            "samples": samples
-        })
+        if samples > 0:
+            selected_panels.append({
+                "panel_name": panel_name,
+                "panel_size_bp": panel_size,
+                "samples": samples,
+            })
 
 st.markdown("### Custom Panels")
 
@@ -256,7 +430,7 @@ for i, panel in enumerate(st.session_state.custom_panels):
         panel["name"] = st.text_input(
             f"Panel name #{i+1}",
             value=panel["name"],
-            key=f"custom_name_{i}"
+            key=f"custom_name_{i}",
         )
 
     with c2:
@@ -265,7 +439,7 @@ for i, panel in enumerate(st.session_state.custom_panels):
             min_value=1,
             value=max(1, int(panel["size_bp"])) if panel["size_bp"] else 1,
             step=1,
-            key=f"custom_size_{i}"
+            key=f"custom_size_{i}",
         )
 
     with c3:
@@ -274,24 +448,27 @@ for i, panel in enumerate(st.session_state.custom_panels):
             min_value=0,
             value=int(panel["samples"]),
             step=1,
-            key=f"custom_samples_{i}"
+            key=f"custom_samples_{i}",
         )
 
-    if panel["name"].strip():
+    if panel["name"].strip() and int(panel["samples"]) > 0:
         selected_panels.append({
             "panel_name": panel["name"].strip(),
-            "panel_size_bp": panel["size_bp"],
-            "samples": panel["samples"]
+            "panel_size_bp": int(panel["size_bp"]),
+            "samples": int(panel["samples"]),
         })
+
     with c4:
-        st.write("")  # spacing
+        st.write("")
         st.write("")
         if st.button(f"Remove Panel #{i+1}", key=f"remove_{i}"):
-            st.session_state.custom_panels.pop(i)
+            remove_custom_panel(i)
             st.rerun()
-# -------------------------
-# calculations
-# -------------------------
+
+
+# =========================
+# CALCULATIONS
+# =========================
 capacity_bp = KIT_OPTIONS[kit_key]["capacity_bp"]
 capacity_gb = capacity_bp / 1e9
 
@@ -310,7 +487,7 @@ for panel in selected_panels:
         "Samples": panel["samples"],
         "Coverage_X": coverage,
         "Required_bp": panel_bp_required,
-        "Required_Gb": panel_bp_required / 1e9
+        "Required_Gb": panel_bp_required / 1e9,
     })
 
 panels_df = pd.DataFrame(panel_rows)
@@ -324,9 +501,10 @@ reads_per_sample = (reads_required / total_samples) if total_samples > 0 else 0
 avg_bp_per_sample = (total_bp_required / total_samples) if total_samples > 0 else 0
 max_samples = (capacity_bp / avg_bp_per_sample) if avg_bp_per_sample > 0 else 0
 
-# -------------------------
-# summary
-# -------------------------
+
+# =========================
+# SUMMARY
+# =========================
 st.subheader("📊 Current Run Summary")
 
 m1, m2, m3, m4 = st.columns(4)
@@ -346,39 +524,43 @@ if total_bp_required > capacity_bp:
 else:
     st.success("✅ This setup is within sequencing capacity.")
 
-# -------------------------
-# panel table
-# -------------------------
+
+# =========================
+# PANEL BREAKDOWN
+# =========================
 st.subheader("🧾 Panel Breakdown")
 if not panels_df.empty:
     st.dataframe(panels_df, use_container_width=True)
 else:
     st.info("No panels selected yet.")
 
-# -------------------------
-# plots
-# -------------------------
+
+# =========================
+# PLOTS
+# =========================
 if not panels_df.empty:
     fig_gb = go.Figure()
     fig_gb.add_trace(go.Bar(
         x=panels_df["Panel"],
         y=panels_df["Required_Gb"],
-        name="Required Gb"
+        name="Required Gb",
     ))
     fig_gb.add_hline(y=capacity_gb)
     fig_gb.update_layout(
         title="Sequencing Usage by Panel (Gb)",
-        yaxis_title="Gb"
+        yaxis_title="Gb",
     )
     st.plotly_chart(fig_gb, use_container_width=True)
 
-# -------------------------
-# current run export
-# -------------------------
+
+# =========================
+# EXPORT CURRENT RUN
+# =========================
 st.subheader("📁 Export Current Run")
 
 summary_df = pd.DataFrame([{
     "Run_Date": datetime.now().strftime("%m/%d/%Y %H:%M"),
+    "Project_Name": project_name,
     "Selected_Reagent_Kit": kit_key,
     "Selected_Reagent_Kit_Label": KIT_OPTIONS[kit_key]["label"],
     "Coverage_X": coverage,
@@ -392,36 +574,42 @@ summary_df = pd.DataFrame([{
     "Reads_Capacity_M": reads_capacity / 1e6,
     "Reads_per_Sample": reads_per_sample,
     "Max_Samples": max_samples,
-    "Notes": notes
+    "Notes": notes,
 }])
 
 st.dataframe(summary_df, use_container_width=True)
 
-csv_detail = panels_df.to_csv(index=False)
-csv_summary = summary_df.to_csv(index=False)
-
 st.download_button(
     "Download Summary CSV",
-    csv_summary,
+    summary_df.to_csv(index=False),
     file_name="NGS_planning_summary.csv",
-    mime="text/csv"
+    mime="text/csv",
 )
 
 st.download_button(
     "Download Panel Breakdown CSV",
-    csv_detail,
+    panels_df.to_csv(index=False),
     file_name="NGS_panel_breakdown.csv",
-    mime="text/csv"
+    mime="text/csv",
 )
 
+
+# =========================
+# SAVE CURRENT RUN
+# =========================
 st.subheader("💾 Save Current Run")
 
 if st.button("Save Current Run to PostgreSQL", type="primary"):
-    if panels_df.empty:
+    if project_name == "":
+        st.warning("Please enter Project Name before saving.")
+    elif panels_df.empty:
         st.warning("Please add at least one valid panel before saving.")
+    elif total_samples <= 0:
+        st.warning("Please enter at least one sample before saving.")
     else:
         summary_record = {
             "run_date": datetime.now(),
+            "project_name": project_name,
             "reagent_kit": kit_key,
             "reagent_kit_label": KIT_OPTIONS[kit_key]["label"],
             "coverage_x": coverage,
@@ -440,7 +628,7 @@ if st.button("Save Current Run to PostgreSQL", type="primary"):
             "reads_capacity_m": reads_capacity / 1e6,
             "reads_per_sample": reads_per_sample,
             "max_samples": max_samples,
-            "notes": notes
+            "notes": notes,
         }
 
         panel_records = []
@@ -451,7 +639,7 @@ if st.button("Save Current Run to PostgreSQL", type="primary"):
                 "samples": int(row["Samples"]),
                 "coverage_x": int(row["Coverage_X"]),
                 "required_bp": float(row["Required_bp"]),
-                "required_gb": float(row["Required_Gb"])
+                "required_gb": float(row["Required_Gb"]),
             })
 
         try:
