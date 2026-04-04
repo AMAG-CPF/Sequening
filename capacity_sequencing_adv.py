@@ -1,12 +1,167 @@
-import streamlit as st
-import plotly.graph_objects as go
-import pandas as pd
+import io
+import re
 from datetime import datetime
+import matplotlib.pyplot as plt
+import pandas as pd
+import streamlit as st
+from matplotlib.ticker import FuncFormatter
 import psycopg2
+import pandas as pd
 from psycopg2.extras import RealDictCursor
 
-st.set_page_config(page_title="NGS Capacity Planner", layout="wide")
+@st.cache_resource
+def get_connection():
+    return psycopg2.connect(
+        host="localhost",
+        port=5432,
+        dbname="sequencing_app",
+        user="postgres",
+        password="AMAG"
+    )
 
+def insert_run(summary_record: dict, panel_records: list[dict]) -> int:
+    conn = get_connection()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sequencing_runs (
+                    run_date,
+                    reagent_kit,
+                    reagent_kit_label,
+                    coverage_x,
+                    total_panels,
+                    total_samples,
+                    total_bp_required,
+                    total_gb_required,
+                    capacity_bp,
+                    capacity_gb,
+                    usage_percent,
+                    remaining_bp,
+                    remaining_gb,
+                    reads_required,
+                    reads_required_m,
+                    reads_capacity,
+                    reads_capacity_m,
+                    reads_per_sample,
+                    max_samples,
+                    notes
+                )
+                VALUES (
+                    %(run_date)s,
+                    %(reagent_kit)s,
+                    %(reagent_kit_label)s,
+                    %(coverage_x)s,
+                    %(total_panels)s,
+                    %(total_samples)s,
+                    %(total_bp_required)s,
+                    %(total_gb_required)s,
+                    %(capacity_bp)s,
+                    %(capacity_gb)s,
+                    %(usage_percent)s,
+                    %(remaining_bp)s,
+                    %(remaining_gb)s,
+                    %(reads_required)s,
+                    %(reads_required_m)s,
+                    %(reads_capacity)s,
+                    %(reads_capacity_m)s,
+                    %(reads_per_sample)s,
+                    %(max_samples)s,
+                    %(notes)s
+                )
+                RETURNING id
+                """,
+                summary_record
+            )
+            run_id = cur.fetchone()[0]
+
+            for panel in panel_records:
+                panel["run_id"] = run_id
+                cur.execute(
+                    """
+                    INSERT INTO sequencing_run_panels (
+                        run_id,
+                        panel_name,
+                        panel_size_bp,
+                        samples,
+                        coverage_x,
+                        required_bp,
+                        required_gb
+                    )
+                    VALUES (
+                        %(run_id)s,
+                        %(panel_name)s,
+                        %(panel_size_bp)s,
+                        %(samples)s,
+                        %(coverage_x)s,
+                        %(required_bp)s,
+                        %(required_gb)s
+                    )
+                    """,
+                    panel
+                )
+
+    return run_id
+
+def load_run_history(limit=100):
+    conn = get_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                run_date,
+                reagent_kit,
+                reagent_kit_label,
+                coverage_x,
+                total_panels,
+                total_samples,
+                total_gb_required,
+                capacity_gb,
+                usage_percent,
+                remaining_gb,
+                reads_required_m,
+                reads_capacity_m,
+                reads_per_sample,
+                max_samples,
+                notes
+            FROM sequencing_runs
+            ORDER BY run_date DESC
+            LIMIT %s
+            """,
+            (limit,)
+        )
+        rows = cur.fetchall()
+    return pd.DataFrame(rows)
+
+def load_panel_history(limit=500):
+    conn = get_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                r.id AS run_id,
+                r.run_date,
+                r.reagent_kit,
+                r.coverage_x,
+                p.panel_name,
+                p.panel_size_bp,
+                p.samples,
+                p.required_gb
+            FROM sequencing_runs r
+            JOIN sequencing_run_panels p
+              ON r.id = p.run_id
+            ORDER BY r.run_date DESC, p.id ASC
+            LIMIT %s
+            """,
+            (limit,)
+        )
+        rows = cur.fetchall()
+    return pd.DataFrame(rows)
+
+
+st.set_page_config(page_title="NGS Capacity Planner", layout="wide")
+st.subheader("📚 Historical Runs")
 READ_LENGTH_BP = 300  # PE150
 
 KIT_OPTIONS = {
@@ -258,3 +413,50 @@ st.download_button(
     file_name="NGS_panel_breakdown.csv",
     mime="text/csv"
 )
+
+st.subheader("💾 Save Current Run")
+
+if st.button("Save Current Run to PostgreSQL", type="primary"):
+    if panels_df.empty:
+        st.warning("Please add at least one valid panel before saving.")
+    else:
+        summary_record = {
+            "run_date": datetime.now(),
+            "reagent_kit": kit_key,
+            "reagent_kit_label": KIT_OPTIONS[kit_key]["label"],
+            "coverage_x": coverage,
+            "total_panels": len(selected_panels),
+            "total_samples": total_samples,
+            "total_bp_required": total_bp_required,
+            "total_gb_required": total_bp_required / 1e9,
+            "capacity_bp": capacity_bp,
+            "capacity_gb": capacity_gb,
+            "usage_percent": usage_percent,
+            "remaining_bp": remaining_bp,
+            "remaining_gb": remaining_gb,
+            "reads_required": reads_required,
+            "reads_required_m": reads_required / 1e6,
+            "reads_capacity": reads_capacity,
+            "reads_capacity_m": reads_capacity / 1e6,
+            "reads_per_sample": reads_per_sample,
+            "max_samples": max_samples,
+            "notes": notes
+        }
+
+        panel_records = []
+        for _, row in panels_df.iterrows():
+            panel_records.append({
+                "panel_name": row["Panel"],
+                "panel_size_bp": int(row["Panel_Size_bp"]),
+                "samples": int(row["Samples"]),
+                "coverage_x": int(row["Coverage_X"]),
+                "required_bp": float(row["Required_bp"]),
+                "required_gb": float(row["Required_Gb"])
+            })
+
+        try:
+            run_id = insert_run(summary_record, panel_records)
+            st.success(f"Run saved successfully. Run ID = {run_id}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to save run: {e}")
