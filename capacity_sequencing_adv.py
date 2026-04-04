@@ -1,226 +1,46 @@
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
+from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime
 
 st.set_page_config(page_title="NGS Capacity Planner", layout="wide")
 
-# =========================
-# CONSTANTS
-# =========================
-READ_LENGTH_BP = 300  # PE150 = 2 x 150
-PARENTAGE_SIZE = 30645
-WSSV_SIZE = 10603
+READ_LENGTH_BP = 300  # PE150
 
 KIT_OPTIONS = {
-    "25M": {
-        "capacity_bp": 7.5e9,
-        "label": "25M (7.5 Gb)"
-    },
-    "60M": {
-        "capacity_bp": 18e9,
-        "label": "60M (18 Gb)"
-    }
+    "25M": {"capacity_bp": 7.5e9, "label": "25M (7.5 Gb)"},
+    "60M": {"capacity_bp": 18e9, "label": "60M (18 Gb)"}
 }
 
-# =========================
-# DB CONNECTION
-# =========================
-@st.cache_resource
-def get_connection():
-    return psycopg2.connect(
-        host=st.secrets["postgres"]["host"],
-        port=st.secrets["postgres"]["port"],
-        dbname=st.secrets["postgres"]["dbname"],
-        user=st.secrets["postgres"]["user"],
-        password=st.secrets["postgres"]["password"],
-        sslmode=st.secrets["postgres"].get("sslmode", "require")
-    )
+PRESET_PANELS = {
+    "Parentage": 30645,
+    "WSSV": 10603
+}
 
-def insert_run(record: dict):
-    conn = get_connection()
-    with conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO sequencing_runs (
-                    run_date,
-                    reagent_kit,
-                    reagent_kit_label,
-                    coverage_x,
-                    parentage_samples,
-                    wssv_samples,
-                    total_samples,
-                    parentage_panel_bp,
-                    wssv_panel_bp,
-                    total_bp_required,
-                    total_gb_required,
-                    capacity_bp,
-                    capacity_gb,
-                    usage_percent,
-                    remaining_bp,
-                    remaining_gb,
-                    reads_required,
-                    reads_required_m,
-                    reads_capacity,
-                    reads_capacity_m,
-                    reads_per_sample,
-                    max_samples,
-                    notes
-                )
-                VALUES (
-                    %(run_date)s,
-                    %(reagent_kit)s,
-                    %(reagent_kit_label)s,
-                    %(coverage_x)s,
-                    %(parentage_samples)s,
-                    %(wssv_samples)s,
-                    %(total_samples)s,
-                    %(parentage_panel_bp)s,
-                    %(wssv_panel_bp)s,
-                    %(total_bp_required)s,
-                    %(total_gb_required)s,
-                    %(capacity_bp)s,
-                    %(capacity_gb)s,
-                    %(usage_percent)s,
-                    %(remaining_bp)s,
-                    %(remaining_gb)s,
-                    %(reads_required)s,
-                    %(reads_required_m)s,
-                    %(reads_capacity)s,
-                    %(reads_capacity_m)s,
-                    %(reads_per_sample)s,
-                    %(max_samples)s,
-                    %(notes)s
-                )
-                """,
-                record
-            )
+# -------------------------
+# session state for custom panels
+# -------------------------
+if "custom_panels" not in st.session_state:
+    st.session_state.custom_panels = []
 
-def load_history(limit=100):
-    conn = get_connection()
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT
-                id,
-                run_date,
-                reagent_kit,
-                reagent_kit_label,
-                coverage_x,
-                parentage_samples,
-                wssv_samples,
-                total_samples,
-                total_gb_required,
-                capacity_gb,
-                usage_percent,
-                remaining_gb,
-                reads_required_m,
-                reads_capacity_m,
-                reads_per_sample,
-                max_samples,
-                notes
-            FROM sequencing_runs
-            ORDER BY run_date DESC
-            LIMIT %s
-            """,
-            (limit,)
-        )
-        rows = cur.fetchall()
-    return pd.DataFrame(rows)
+def add_custom_panel():
+    st.session_state.custom_panels.append({
+        "name": "",
+        "size_bp": 0,
+        "samples": 0
+    })
+def remove_custom_panel(index: int):
+    st.session_state.custom_panels.pop(index)
+st.title(":material/home: NGS Capacity Planner")
 
-# =========================
-# HELPERS
-# =========================
-def calculate_metrics(kit_key, coverage, parentage_samples, wssv_samples):
-    capacity_bp = KIT_OPTIONS[kit_key]["capacity_bp"]
-    reagent_kit_label = KIT_OPTIONS[kit_key]["label"]
-
-    parentage_bp = parentage_samples * PARENTAGE_SIZE * coverage
-    wssv_bp = wssv_samples * WSSV_SIZE * coverage
-    total_bp = parentage_bp + wssv_bp
-
-    total_gb = total_bp / 1e9
-    capacity_gb = capacity_bp / 1e9
-
-    reads_required = total_bp / READ_LENGTH_BP
-    reads_capacity = capacity_bp / READ_LENGTH_BP
-
-    usage_percent = (total_bp / capacity_bp * 100) if capacity_bp > 0 else 0
-    remaining_bp = capacity_bp - total_bp
-    remaining_gb = remaining_bp / 1e9
-
-    total_samples = parentage_samples + wssv_samples
-    reads_per_sample = (reads_required / total_samples) if total_samples > 0 else 0
-
-    avg_bp_per_sample = (total_bp / total_samples) if total_samples > 0 else 0
-    max_samples = (capacity_bp / avg_bp_per_sample) if avg_bp_per_sample > 0 else 0
-
-    return {
-        "reagent_kit": kit_key,
-        "reagent_kit_label": reagent_kit_label,
-        "coverage_x": coverage,
-        "parentage_samples": parentage_samples,
-        "wssv_samples": wssv_samples,
-        "total_samples": total_samples,
-        "parentage_panel_bp": PARENTAGE_SIZE,
-        "wssv_panel_bp": WSSV_SIZE,
-        "parentage_bp_required": parentage_bp,
-        "wssv_bp_required": wssv_bp,
-        "total_bp_required": total_bp,
-        "total_gb_required": total_gb,
-        "capacity_bp": capacity_bp,
-        "capacity_gb": capacity_gb,
-        "usage_percent": usage_percent,
-        "remaining_bp": remaining_bp,
-        "remaining_gb": remaining_gb,
-        "reads_required": reads_required,
-        "reads_required_m": reads_required / 1e6,
-        "reads_capacity": reads_capacity,
-        "reads_capacity_m": reads_capacity / 1e6,
-        "reads_per_sample": reads_per_sample,
-        "max_samples": max_samples,
-    }
-
-# =========================
-# TITLE
-# =========================
-st.title("🧬 NGS Capacity Planner")
-st.caption("Salus Nimbo planning tool with PostgreSQL run history")
-
-# =========================
-# LOAD HISTORY FIRST
-# =========================
-st.subheader("📚 Historical Runs")
-history_df = load_history(limit=200)
-
-if not history_df.empty:
-    display_df = history_df.copy()
-    if "run_date" in display_df.columns:
-        display_df["run_date"] = pd.to_datetime(display_df["run_date"]).dt.strftime("%m/%d/%Y %H:%M")
-
-    st.dataframe(display_df, use_container_width=True)
-
-    st.download_button(
-        "Download History CSV",
-        history_df.to_csv(index=False),
-        file_name="sequencing_run_history.csv",
-        mime="text/csv"
-    )
-else:
-    st.info("No saved run history yet.")
-
-st.divider()
-
-# =========================
-# INPUTS
-# =========================
+# -------------------------
+# HISTORY placeholder
+# -------------------------
 st.subheader("⚙️ Current Run Setup")
 
-col1, col2, col3 = st.columns(3)
-
+col1, col2 = st.columns(2)
 with col1:
     kit_key = st.radio(
         "Select Reagent Kit",
@@ -228,163 +48,213 @@ with col1:
         format_func=lambda x: KIT_OPTIONS[x]["label"],
         horizontal=True
     )
-
 with col2:
     coverage = st.number_input("Coverage (X)", min_value=1, max_value=1000, value=20, step=1)
 
-with col3:
-    notes = st.text_input("Notes / Project name", value="")
+notes = st.text_input("Notes / Project name", value="")
 
-col4, col5 = st.columns(2)
+st.markdown("### Preset Panels")
 
-with col4:
-    parentage_samples = st.number_input("Parentage samples", min_value=0, max_value=100000, value=300, step=1)
+selected_panels = []
 
-with col5:
-    wssv_samples = st.number_input("WSSV samples", min_value=0, max_value=100000, value=200, step=1)
+for panel_name, panel_size in PRESET_PANELS.items():
+    use_panel = st.checkbox(f"Use {panel_name} ({panel_size:,} bp)", value=(panel_name in ["Parentage", "WSSV"]))
+    if use_panel:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            samples = st.number_input(
+                f"{panel_name} samples",
+                min_value=0,
+                max_value=100000,
+                value=300 if panel_name == "Parentage" else 200,
+                step=1,
+                key=f"{panel_name}_samples"
+            )
+        with c2:
+            st.number_input(
+                f"{panel_name} panel size (bp)",
+                min_value=1,
+                value=panel_size,
+                step=1,
+                key=f"{panel_name}_size",
+                disabled=True
+            )
 
-# =========================
-# CALCULATE
-# =========================
-metrics = calculate_metrics(
-    kit_key=kit_key,
-    coverage=coverage,
-    parentage_samples=parentage_samples,
-    wssv_samples=wssv_samples
-)
+        selected_panels.append({
+            "panel_name": panel_name,
+            "panel_size_bp": panel_size,
+            "samples": samples
+        })
 
-# =========================
-# SUMMARY METRICS
-# =========================
+st.markdown("### Custom Panels")
+
+c_add, _ = st.columns([1, 4])
+with c_add:
+    if st.button("Add Custom Panel"):
+        add_custom_panel()
+
+for i, panel in enumerate(st.session_state.custom_panels):
+    st.markdown(f"**Custom Panel {i+1}**")
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+        panel["name"] = st.text_input(
+            f"Panel name #{i+1}",
+            value=panel["name"],
+            key=f"custom_name_{i}"
+        )
+
+    with c2:
+        panel["size_bp"] = st.number_input(
+            f"Panel size (bp) #{i+1}",
+            min_value=1,
+            value=max(1, int(panel["size_bp"])) if panel["size_bp"] else 1,
+            step=1,
+            key=f"custom_size_{i}"
+        )
+
+    with c3:
+        panel["samples"] = st.number_input(
+            f"Samples #{i+1}",
+            min_value=0,
+            value=int(panel["samples"]),
+            step=1,
+            key=f"custom_samples_{i}"
+        )
+
+    if panel["name"].strip():
+        selected_panels.append({
+            "panel_name": panel["name"].strip(),
+            "panel_size_bp": panel["size_bp"],
+            "samples": panel["samples"]
+        })
+    with c4:
+        st.write("")  # spacing
+        st.write("")
+        if st.button(f"Remove Panel #{i+1}", key=f"remove_{i}"):
+            st.session_state.custom_panels.pop(i)
+            st.rerun()
+# -------------------------
+# calculations
+# -------------------------
+capacity_bp = KIT_OPTIONS[kit_key]["capacity_bp"]
+capacity_gb = capacity_bp / 1e9
+
+panel_rows = []
+total_bp_required = 0
+total_samples = 0
+
+for panel in selected_panels:
+    panel_bp_required = panel["panel_size_bp"] * panel["samples"] * coverage
+    total_bp_required += panel_bp_required
+    total_samples += panel["samples"]
+
+    panel_rows.append({
+        "Panel": panel["panel_name"],
+        "Panel_Size_bp": panel["panel_size_bp"],
+        "Samples": panel["samples"],
+        "Coverage_X": coverage,
+        "Required_bp": panel_bp_required,
+        "Required_Gb": panel_bp_required / 1e9
+    })
+
+panels_df = pd.DataFrame(panel_rows)
+
+reads_required = total_bp_required / READ_LENGTH_BP
+reads_capacity = capacity_bp / READ_LENGTH_BP
+usage_percent = (total_bp_required / capacity_bp * 100) if capacity_bp > 0 else 0
+remaining_bp = capacity_bp - total_bp_required
+remaining_gb = remaining_bp / 1e9
+reads_per_sample = (reads_required / total_samples) if total_samples > 0 else 0
+avg_bp_per_sample = (total_bp_required / total_samples) if total_samples > 0 else 0
+max_samples = (capacity_bp / avg_bp_per_sample) if avg_bp_per_sample > 0 else 0
+
+# -------------------------
+# summary
+# -------------------------
 st.subheader("📊 Current Run Summary")
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total Required (Gb)", f"{metrics['total_gb_required']:.4f}")
-m2.metric("Capacity (Gb)", f"{metrics['capacity_gb']:.2f}")
-m3.metric("Usage (%)", f"{metrics['usage_percent']:.2f}")
-m4.metric("Remaining (Gb)", f"{metrics['remaining_gb']:.4f}")
+m1.metric("Total Required (Gb)", f"{total_bp_required/1e9:.4f}")
+m2.metric("Capacity (Gb)", f"{capacity_gb:.2f}")
+m3.metric("Usage (%)", f"{usage_percent:.2f}")
+m4.metric("Remaining (Gb)", f"{remaining_gb:.4f}")
 
 m5, m6, m7, m8 = st.columns(4)
-m5.metric("Reads Required (M)", f"{metrics['reads_required_m']:.4f}")
-m6.metric("Reads Capacity (M)", f"{metrics['reads_capacity_m']:.2f}")
-m7.metric("Reads / Sample", f"{metrics['reads_per_sample']:.2f}")
-m8.metric("Max Samples / Run", f"{metrics['max_samples']:.0f}")
+m5.metric("Reads Required (M)", f"{reads_required/1e6:.4f}")
+m6.metric("Reads Capacity (M)", f"{reads_capacity/1e6:.2f}")
+m7.metric("Reads / Sample", f"{reads_per_sample:.2f}")
+m8.metric("Max Samples / Run", f"{max_samples:.0f}")
 
-if metrics["total_bp_required"] > metrics["capacity_bp"]:
+if total_bp_required > capacity_bp:
     st.error("⚠️ This setup exceeds sequencing capacity.")
 else:
     st.success("✅ This setup is within sequencing capacity.")
 
-# =========================
-# PLOTS
-# =========================
-plot_col1, plot_col2 = st.columns(2)
+# -------------------------
+# panel table
+# -------------------------
+st.subheader("🧾 Panel Breakdown")
+if not panels_df.empty:
+    st.dataframe(panels_df, use_container_width=True)
+else:
+    st.info("No panels selected yet.")
 
-with plot_col1:
+# -------------------------
+# plots
+# -------------------------
+if not panels_df.empty:
     fig_gb = go.Figure()
     fig_gb.add_trace(go.Bar(
-        x=["Parentage", "WSSV"],
-        y=[
-            metrics["parentage_bp_required"] / 1e9,
-            metrics["wssv_bp_required"] / 1e9
-        ],
+        x=panels_df["Panel"],
+        y=panels_df["Required_Gb"],
         name="Required Gb"
     ))
-    fig_gb.add_hline(y=metrics["capacity_gb"])
+    fig_gb.add_hline(y=capacity_gb)
     fig_gb.update_layout(
-        title="Sequencing Usage (Gb)",
+        title="Sequencing Usage by Panel (Gb)",
         yaxis_title="Gb"
     )
     st.plotly_chart(fig_gb, use_container_width=True)
 
-with plot_col2:
-    fig_reads = go.Figure()
-    fig_reads.add_trace(go.Bar(
-        x=["Required Reads"],
-        y=[metrics["reads_required_m"]],
-        name="Required Reads (M)"
-    ))
-    fig_reads.add_trace(go.Bar(
-        x=["Capacity Reads"],
-        y=[metrics["reads_capacity_m"]],
-        name="Capacity Reads (M)"
-    ))
-    fig_reads.update_layout(
-        title="Reads Usage (Million Reads)",
-        yaxis_title="Reads (M)"
-    )
-    st.plotly_chart(fig_reads, use_container_width=True)
-
-# =========================
-# CURRENT RUN EXPORT
-# =========================
+# -------------------------
+# current run export
+# -------------------------
 st.subheader("📁 Export Current Run")
 
-current_run_df = pd.DataFrame([{
+summary_df = pd.DataFrame([{
     "Run_Date": datetime.now().strftime("%m/%d/%Y %H:%M"),
-    "Selected_Reagent_Kit": metrics["reagent_kit"],
-    "Selected_Reagent_Kit_Label": metrics["reagent_kit_label"],
-    "Coverage_X": metrics["coverage_x"],
-    "Parentage_Samples": metrics["parentage_samples"],
-    "WSSV_Samples": metrics["wssv_samples"],
-    "Total_Samples": metrics["total_samples"],
-    "Parentage_Panel_bp": metrics["parentage_panel_bp"],
-    "WSSV_Panel_bp": metrics["wssv_panel_bp"],
-    "Total_Gb_Required": metrics["total_gb_required"],
-    "Capacity_Gb": metrics["capacity_gb"],
-    "Usage_Percent": metrics["usage_percent"],
-    "Remaining_Gb": metrics["remaining_gb"],
-    "Reads_Required_M": metrics["reads_required_m"],
-    "Reads_Capacity_M": metrics["reads_capacity_m"],
-    "Reads_per_Sample": metrics["reads_per_sample"],
-    "Max_Samples": metrics["max_samples"],
+    "Selected_Reagent_Kit": kit_key,
+    "Selected_Reagent_Kit_Label": KIT_OPTIONS[kit_key]["label"],
+    "Coverage_X": coverage,
+    "Total_Panels": len(selected_panels),
+    "Total_Samples": total_samples,
+    "Total_Gb_Required": total_bp_required / 1e9,
+    "Capacity_Gb": capacity_gb,
+    "Usage_Percent": usage_percent,
+    "Remaining_Gb": remaining_gb,
+    "Reads_Required_M": reads_required / 1e6,
+    "Reads_Capacity_M": reads_capacity / 1e6,
+    "Reads_per_Sample": reads_per_sample,
+    "Max_Samples": max_samples,
     "Notes": notes
 }])
 
-st.dataframe(current_run_df, use_container_width=True)
+st.dataframe(summary_df, use_container_width=True)
+
+csv_detail = panels_df.to_csv(index=False)
+csv_summary = summary_df.to_csv(index=False)
 
 st.download_button(
-    "Download Current Run CSV",
-    current_run_df.to_csv(index=False),
-    file_name="NGS_planning_report.csv",
+    "Download Summary CSV",
+    csv_summary,
+    file_name="NGS_planning_summary.csv",
     mime="text/csv"
 )
 
-# =========================
-# SAVE TO DATABASE
-# =========================
-st.subheader("💾 Save Current Run")
-
-if st.button("Save Current Run to PostgreSQL", type="primary"):
-    record = {
-        "run_date": datetime.now(),
-        "reagent_kit": metrics["reagent_kit"],
-        "reagent_kit_label": metrics["reagent_kit_label"],
-        "coverage_x": metrics["coverage_x"],
-        "parentage_samples": metrics["parentage_samples"],
-        "wssv_samples": metrics["wssv_samples"],
-        "total_samples": metrics["total_samples"],
-        "parentage_panel_bp": metrics["parentage_panel_bp"],
-        "wssv_panel_bp": metrics["wssv_panel_bp"],
-        "total_bp_required": metrics["total_bp_required"],
-        "total_gb_required": metrics["total_gb_required"],
-        "capacity_bp": metrics["capacity_bp"],
-        "capacity_gb": metrics["capacity_gb"],
-        "usage_percent": metrics["usage_percent"],
-        "remaining_bp": metrics["remaining_bp"],
-        "remaining_gb": metrics["remaining_gb"],
-        "reads_required": metrics["reads_required"],
-        "reads_required_m": metrics["reads_required_m"],
-        "reads_capacity": metrics["reads_capacity"],
-        "reads_capacity_m": metrics["reads_capacity_m"],
-        "reads_per_sample": metrics["reads_per_sample"],
-        "max_samples": metrics["max_samples"],
-        "notes": notes
-    }
-
-    try:
-        insert_run(record)
-        st.success("Run saved successfully.")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Failed to save run: {e}")
+st.download_button(
+    "Download Panel Breakdown CSV",
+    csv_detail,
+    file_name="NGS_panel_breakdown.csv",
+    mime="text/csv"
+)
