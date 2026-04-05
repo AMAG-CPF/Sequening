@@ -493,150 +493,6 @@ def make_pdf_report(df_report: pd.DataFrame, project_name: str) -> io.BytesIO:
     return buffer
 
 # =========================================================
-# Database functions
-# =========================================================
-def load_projects(conn):
-    query = """
-        SELECT DISTINCT project_name
-        FROM ngs_qc_runs
-        WHERE project_name IS NOT NULL
-          AND COALESCE(is_deleted, FALSE) = FALSE
-        ORDER BY project_name
-    """
-    return pd.read_sql(query, conn)
-
-
-def load_runs_by_project(conn, project_name):
-    query = """
-        SELECT
-            id,
-            flow_cell,
-            run_date_be,
-            software_version,
-            cycle_number,
-            total_reads_m,
-            q30_percent,
-            split_rate_percent,
-            density,
-            notes,
-            created_at
-        FROM ngs_qc_runs
-        WHERE project_name = %s
-          AND COALESCE(is_deleted, FALSE) = FALSE
-        ORDER BY id DESC
-    """
-    return pd.read_sql(query, conn, params=(project_name,))
-
-def load_run_info(conn, run_id):
-    query = """
-        SELECT
-            id,
-            created_at,
-            project_name,
-            flow_cell,
-            run_date_be,
-            software_version,
-            cycle_number,
-            read1_length,
-            read2_length,
-            index1_length,
-            index2_length,
-            total_reads_m,
-            q30_percent,
-            split_rate_percent,
-            density,
-            notes
-        FROM ngs_qc_runs
-        WHERE id = %s
-    """
-
-    df = pd.read_sql(query, conn, params=(run_id,))
-    if df.empty:
-        return {}
-
-    row = df.iloc[0]
-    return {
-        "Project": row.get("project_name", "NA"),
-        "Flow Cell": row.get("flow_cell", "NA"),
-        "Run Date": row.get("run_date_be", "NA"),
-        "Software Version": row.get("software_version", "NA"),
-        "CycleNumber": row.get("cycle_number", "NA"),
-        "Read1 Length": row.get("read1_length", "NA"),
-        "Read2 Length": row.get("read2_length", "NA"),
-        "Index1 Length": row.get("index1_length", "NA"),
-        "Index2 Length": row.get("index2_length", "NA"),
-        "TotalReads(M)": row.get("total_reads_m", "NA"),
-        "Q30(%)": row.get("q30_percent", "NA"),
-        "SplitRate(%)": row.get("split_rate_percent", "NA"),
-        "Density(um²)": row.get("density", "NA"),
-        "Notes": row.get("notes", ""),
-    }
-
-
-def load_sample_qc(conn, run_id):
-    query = """
-        SELECT
-            sample_name AS sample,
-            raw_reads_before AS raw_reads_before,
-            duplication_percent AS duplication_percent,
-            q30_percent AS q30_percent,
-            mb_q30_bases AS mb_q30_bases,
-            gc_content AS gc_content,
-            adapter_percent AS adapter_percent,
-            clean_reads_after AS clean_reads_after,
-            filtering_rate AS filtering_rate,
-            total_alignments AS total_alignments,
-            mapped_reads AS mapped_reads,
-            mapped_reads_percent AS mapped_reads_percent,
-            qc_status AS qc_status
-        FROM ngs_qc_samples
-        WHERE run_id = %s
-        ORDER BY sample_name
-    """
-    df = pd.read_sql(query, conn, params=(run_id,))
-
-    return df.rename(columns={
-        "sample": "Sample",
-        "raw_reads_before": "Raw_Reads_Before",
-        "duplication_percent": "% Duplication",
-        "q30_percent": "% > Q30",
-        "mb_q30_bases": "Mb Q30 bases",
-        "gc_content": "GC content",
-        "adapter_percent": "% Adapter",
-        "clean_reads_after": "Clean_Reads_After",
-        "filtering_rate": "Filtering_Rate",
-        "total_alignments": "Total_Alignments",
-        "mapped_reads": "Mapped_Reads",
-        "mapped_reads_percent": "Mapped_Reads(%)",
-        "qc_status": "QC_Status",
-    })
-
-
-def load_target_coverage(conn, run_id):
-    query = """
-        SELECT
-            sample_name,
-            target_name,
-            coverage
-        FROM ngs_qc_target_coverage
-        WHERE run_id = %s
-        ORDER BY sample_name, target_name
-    """
-    long_df = pd.read_sql(query, conn, params=(run_id,))
-    if long_df.empty:
-        return pd.DataFrame()
-
-    wide_df = long_df.pivot(
-        index="target_name",
-        columns="sample_name",
-        values="coverage"
-    ).reset_index()
-
-    wide_df = wide_df.rename(columns={"target_name": "CHR"})
-    wide_df.columns.name = None
-    return wide_df
-
-# =========================================================
 # Reusable render functions
 # =========================================================
 def render_run_info(run_info: dict):
@@ -1074,7 +930,7 @@ if st.button("Save Current QC Run to PostgreSQL", type="primary"):
 
 
 # =========================================================
-# TAB 2: Browse Database
+# TAB 2: Browse Neon Database
 # =========================================================
 with tab2:
     st.subheader("Project Selection")
@@ -1089,40 +945,52 @@ with tab2:
         st.warning("No runs found.")
         st.stop()
 
-    # init session state
     if "confirm_delete_run_id" not in st.session_state:
         st.session_state.confirm_delete_run_id = None
 
-    # =========================
-    # SEARCH + SELECT PROJECT
-    # =========================
-    project_search = st.text_input("Search Project")
+    # -------------------------
+    # Search project
+    # -------------------------
+    project_search = st.text_input("Search Project", key="project_search_tab2").strip()
 
     filtered_history_df = run_history_df.copy()
     if project_search:
         filtered_history_df = filtered_history_df[
-            filtered_history_df["project_name"].str.contains(project_search, case=False, na=False)
+            filtered_history_df["project_name"].astype(str).str.contains(project_search, case=False, na=False)
         ]
 
-    project_options = filtered_history_df["project_name"].dropna().unique().tolist()
+    project_options = filtered_history_df["project_name"].dropna().astype(str).unique().tolist()
 
     if not project_options:
         st.warning("No matching projects found.")
         st.stop()
 
-    selected_project = st.selectbox("Select Project", project_options)
-
-    project_runs = filtered_history_df[
-        filtered_history_df["project_name"] == selected_project
-    ].copy()
-
-    project_runs["run_label"] = (
-        project_runs["flow_cell"].fillna("NA").astype(str) + " | " +
-        project_runs["run_date_be"].fillna("NA").astype(str) + " | Run ID: " +
-        project_runs["id"].astype(str)
+    selected_project = st.selectbox(
+        "Select Project",
+        project_options,
+        key="selected_project_tab2"
     )
 
-    selected_run_label = st.selectbox("Select Run", project_runs["run_label"])
+    project_runs = filtered_history_df[
+        filtered_history_df["project_name"].astype(str) == str(selected_project)
+    ].copy()
+
+    if project_runs.empty:
+        st.warning("No runs found for selected project.")
+        st.stop()
+
+    project_runs["run_label"] = project_runs.apply(
+        lambda x: f"{str(x['flow_cell']) if pd.notna(x['flow_cell']) else 'NA'} | "
+                  f"{str(x['run_date_be']) if pd.notna(x['run_date_be']) else 'NA'} | "
+                  f"Run ID: {int(x['id'])}",
+        axis=1
+    )
+
+    selected_run_label = st.selectbox(
+        "Select Run",
+        project_runs["run_label"].tolist(),
+        key="selected_run_label_tab2"
+    )
 
     selected_run_id = int(
         project_runs.loc[
@@ -1130,66 +998,79 @@ with tab2:
         ].iloc[0]
     )
 
-    # =========================
-    # LOAD DATA
-    # =========================
-    sample_qc_df = load_qc_samples(selected_run_id)
-    coverage_df_db = load_qc_coverage(selected_run_id)
+    # -------------------------
+    # Load selected run data
+    # -------------------------
+    try:
+        conn = get_connection()
+        try:
+            sample_qc_df = load_sample_qc(conn, selected_run_id)
+            coverage_df_db = load_target_coverage(conn, selected_run_id)
+        finally:
+            conn.close()
+    except Exception as e:
+        st.error(f"Failed to load run data: {e}")
+        st.stop()
 
-    render_sample_qc(sample_qc_df)
+    st.markdown("---")
+    st.subheader(f"Selected Run: {selected_run_id}")
 
-    if not coverage_df_db.empty:
+    if sample_qc_df is not None and not sample_qc_df.empty:
+        render_sample_qc(sample_qc_df)
+    else:
+        st.info("No sample QC data found for this run.")
+
+    if coverage_df_db is not None and not coverage_df_db.empty:
         render_coverage_module(coverage_df_db)
+    else:
+        st.info("No target coverage data found for this run.")
 
-    # =========================
-    # MANAGE DATABASE
-    # =========================
+    # -------------------------
+    # Manage Database
+    # -------------------------
     st.markdown("---")
     st.subheader("Manage Database")
 
     with st.expander("🗑️ Manage Historical Runs"):
-        if project_runs.empty:
-            st.info("No runs available to delete.")
-        else:
-            delete_options = project_runs[["id", "project_name", "run_date_be", "flow_cell"]].copy()
+        delete_options = project_runs[["id", "project_name", "run_date_be", "flow_cell"]].copy()
 
-            delete_options["label"] = delete_options.apply(
-                lambda x: (
-                    f"Run ID {x['id']} | "
-                    f"{x['project_name']} | "
-                    f"{x['run_date_be']} | "
-                    f"{x['flow_cell']}"
-                ),
-                axis=1
-            )
+        delete_options["label"] = delete_options.apply(
+            lambda x: (
+                f"Run ID {int(x['id'])} | "
+                f"{x['project_name']} | "
+                f"{x['run_date_be']} | "
+                f"{x['flow_cell']}"
+            ),
+            axis=1
+        )
 
-            selected_delete_label = st.selectbox(
-                "Select a run to delete",
-                options=delete_options["label"].tolist(),
-                key="delete_run_selectbox"
-            )
+        selected_delete_label = st.selectbox(
+            "Select a run to delete",
+            options=delete_options["label"].tolist(),
+            key="delete_run_selectbox"
+        )
 
-            delete_run_id = int(
-                delete_options.loc[
-                    delete_options["label"] == selected_delete_label, "id"
-                ].iloc[0]
-            )
+        delete_run_id = int(
+            delete_options.loc[
+                delete_options["label"] == selected_delete_label, "id"
+            ].iloc[0]
+        )
 
-            cdel1, cdel2 = st.columns(2)
+        cdel1, cdel2 = st.columns(2)
 
-            with cdel1:
-                if st.button("Prepare Delete", type="secondary", key="prepare_delete_btn"):
-                    st.session_state.confirm_delete_run_id = delete_run_id
+        with cdel1:
+            if st.button("Prepare Delete", type="secondary", key="prepare_delete_btn"):
+                st.session_state.confirm_delete_run_id = delete_run_id
 
-            with cdel2:
-                if (
-                    st.session_state.confirm_delete_run_id == delete_run_id
-                    and st.button("Confirm Soft Delete", type="primary", key="confirm_delete_btn")
-                ):
-                    try:
-                        soft_delete_qc_run(delete_run_id)
-                        st.success(f"Run ID {delete_run_id} has been deleted.")
-                        st.session_state.confirm_delete_run_id = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to delete run: {e}")
+        with cdel2:
+            if (
+                st.session_state.confirm_delete_run_id == delete_run_id
+                and st.button("Confirm Soft Delete", type="primary", key="confirm_delete_btn")
+            ):
+                try:
+                    soft_delete_qc_run(delete_run_id)
+                    st.success(f"Run ID {delete_run_id} has been deleted.")
+                    st.session_state.confirm_delete_run_id = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to delete run: {e}")
