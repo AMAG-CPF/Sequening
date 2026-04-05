@@ -1081,7 +1081,7 @@ with tab2:
     try:
         run_history_df = load_qc_run_history()
 
-if run_history_df.empty:
+    if run_history_df.empty:
     st.warning("No runs found.")
     st.stop()
 
