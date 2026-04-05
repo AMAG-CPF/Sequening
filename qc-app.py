@@ -1040,99 +1040,6 @@ with tab1:
             mime="application/pdf",
         )
 
-        st.subheader("Save to Neon Database")
-        engine = get_engine()
-
-        if st.button("Save Current Run to Neon"):
-            try:
-                run_id = save_run(engine, run_info)
-                save_sample_qc(engine, run_id, df)
-
-                if coverage_df is not None and not coverage_df.empty:
-                    save_target_coverage(engine, run_id, coverage_df)
-
-                st.success(f"Saved successfully. Run ID: {run_id}")
-            except Exception as e:
-                st.error(f"Failed to save to database: {e}")
-    else:
-        st.info("Please upload MultiQC, FASTP, and Flagstat files to begin.")
-
-
-# =========================================================
-# TAB 2: Browse Neon Database
-# =========================================================
-with tab2:
-    st.subheader("Project Selection")
-
-    try:
-        engine = get_engine()
-        project_df = load_projects(engine)
-    except Exception as e:
-        st.error(f"Cannot connect to Neon database: {e}")
-        st.stop()
-
-    s1, s2 = st.columns([3, 1])
-    with s1:
-        project_search = st.text_input("Search Project", value="")
-    with s2:
-        search_clicked = st.button("Search")
-
-    if search_clicked:
-        st.session_state["project_search_value"] = project_search
-
-    search_value = st.session_state.get("project_search_value", project_search)
-
-    if search_value.strip():
-        filtered_projects = project_df[
-            project_df["project_name"].str.contains(search_value, case=False, na=False)
-        ].copy()
-    else:
-        filtered_projects = project_df.copy()
-
-    project_options = filtered_projects["project_name"].dropna().tolist()
-
-    if len(project_options) == 0:
-        st.warning("No matching project found.")
-        st.stop()
-
-    selected_project = st.selectbox(
-        "Select Project",
-        project_options,
-        key="db_selected_project"
-    )
-
-    run_df = load_runs_by_project(engine, selected_project)
-
-    if run_df.empty:
-        st.warning("No runs found for this project.")
-        st.stop()
-
-    run_df["run_label"] = (
-        run_df["flow_cell"].fillna("NA").astype(str) + " | " +
-        run_df["run_date_be"].fillna("NA").astype(str) + " | Run ID: " +
-        run_df["id"].astype(str)
-    )
-
-    selected_run_label = st.selectbox(
-        "Select Run",
-        run_df["run_label"].tolist(),
-        key="db_selected_run"
-    )
-
-    selected_run_id = int(
-        run_df.loc[run_df["run_label"] == selected_run_label, "id"].iloc[0]
-    )
-
-    run_info = load_run_info(engine, selected_run_id)
-    sample_qc_df = load_sample_qc(engine, selected_run_id)
-    coverage_df_db = load_target_coverage(engine, selected_run_id)
-
-    render_run_info(run_info)
-    render_sample_qc(sample_qc_df)
-
-    if not coverage_df_db.empty:
-        render_coverage_module(coverage_df_db)
-    
 # =========================
 # SAVE CURRENT RUN
 # =========================
@@ -1164,3 +1071,57 @@ if st.button("Save Current QC Run to Neon", type="primary"):
         st.success(f"QC run saved successfully. Run ID = {run_id}")
     except Exception as e:
         st.error(f"Failed to save QC run: {e}")
+
+# =========================================================
+# TAB 2: Browse Neon Database
+# =========================================================
+with tab2:
+    st.subheader("Project Selection")
+
+    try:
+        run_history_df = load_qc_run_history()
+
+if run_history_df.empty:
+    st.warning("No runs found.")
+    st.stop()
+
+# Search
+project_search = st.text_input("Search Project")
+
+if project_search:
+    run_history_df = run_history_df[
+        run_history_df["project_name"].str.contains(project_search, case=False, na=False)
+    ]
+
+project_options = run_history_df["project_name"].dropna().unique().tolist()
+
+selected_project = st.selectbox("Select Project", project_options)
+
+# filter runs
+project_runs = run_history_df[
+    run_history_df["project_name"] == selected_project
+]
+
+project_runs["run_label"] = (
+    project_runs["flow_cell"].fillna("NA") + " | " +
+    project_runs["run_date_be"].fillna("NA") + " | Run ID: " +
+    project_runs["id"].astype(str)
+)
+
+selected_run_label = st.selectbox("Select Run", project_runs["run_label"])
+
+selected_run_id = int(
+    project_runs.loc[
+        project_runs["run_label"] == selected_run_label, "id"
+    ].iloc[0]
+)
+
+# load data
+run_info = {}  # optional (ถ้ายังไม่ได้แยก function)
+sample_qc_df = load_qc_samples(selected_run_id)
+coverage_df_db = load_qc_coverage(selected_run_id)
+
+render_sample_qc(sample_qc_df)
+
+if not coverage_df_db.empty:
+    render_coverage_module(coverage_df_db)
