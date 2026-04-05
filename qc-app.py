@@ -838,7 +838,7 @@ def render_coverage_module(coverage_df: pd.DataFrame):
 # =========================================================
 # Tabs
 # =========================================================
-tab1, tab2 = st.tabs(["Upload & Analyze", "Browse Neon Database"])
+tab1, tab2 = st.tabs(["Upload & Analyze", "Browse Database"])
 
 
 # =========================================================
@@ -1080,75 +1080,116 @@ with tab2:
     st.subheader("Project Selection")
 
     try:
-        conn = get_connection()
-        project_df = load_projects(conn)
+        run_history_df = load_qc_run_history()
     except Exception as e:
-        st.error(f"Cannot connect to PostgreSQL database: {e}")
+        st.error(f"Cannot connect to Neon database: {e}")
         st.stop()
 
-    s1, s2 = st.columns([3, 1])
-    with s1:
-        project_search = st.text_input("Search Project", value="")
-    with s2:
-        search_clicked = st.button("Search")
-
-    if search_clicked:
-        st.session_state["project_search_value"] = project_search
-
-    search_value = st.session_state.get("project_search_value", project_search)
-
-    if search_value.strip():
-        filtered_projects = project_df[
-            project_df["project_name"].str.contains(search_value, case=False, na=False)
-        ].copy()
-    else:
-        filtered_projects = project_df.copy()
-
-    project_options = filtered_projects["project_name"].dropna().tolist()
-
-    if len(project_options) == 0:
-        st.warning("No matching project found.")
-        conn.close()
+    if run_history_df.empty:
+        st.warning("No runs found.")
         st.stop()
 
-    selected_project = st.selectbox(
-        "Select Project",
-        project_options,
-        key="db_selected_project"
-    )
+    # init session state
+    if "confirm_delete_run_id" not in st.session_state:
+        st.session_state.confirm_delete_run_id = None
 
-    run_df = load_runs_by_project(conn, selected_project)
+    # =========================
+    # SEARCH + SELECT PROJECT
+    # =========================
+    project_search = st.text_input("Search Project")
 
-    if run_df.empty:
-        st.warning("No runs found for this project.")
-        conn.close()
+    filtered_history_df = run_history_df.copy()
+    if project_search:
+        filtered_history_df = filtered_history_df[
+            filtered_history_df["project_name"].str.contains(project_search, case=False, na=False)
+        ]
+
+    project_options = filtered_history_df["project_name"].dropna().unique().tolist()
+
+    if not project_options:
+        st.warning("No matching projects found.")
         st.stop()
 
-    run_df["run_label"] = (
-        run_df["flow_cell"].fillna("NA").astype(str) + " | " +
-        run_df["run_date_be"].fillna("NA").astype(str) + " | Run ID: " +
-        run_df["id"].astype(str)
+    selected_project = st.selectbox("Select Project", project_options)
+
+    project_runs = filtered_history_df[
+        filtered_history_df["project_name"] == selected_project
+    ].copy()
+
+    project_runs["run_label"] = (
+        project_runs["flow_cell"].fillna("NA").astype(str) + " | " +
+        project_runs["run_date_be"].fillna("NA").astype(str) + " | Run ID: " +
+        project_runs["id"].astype(str)
     )
 
-    selected_run_label = st.selectbox(
-        "Select Run",
-        run_df["run_label"].tolist(),
-        key="db_selected_run"
-    )
+    selected_run_label = st.selectbox("Select Run", project_runs["run_label"])
 
     selected_run_id = int(
-        run_df.loc[run_df["run_label"] == selected_run_label, "id"].iloc[0]
+        project_runs.loc[
+            project_runs["run_label"] == selected_run_label, "id"
+        ].iloc[0]
     )
 
-    run_info = load_run_info(conn, selected_run_id)
-    sample_qc_df = load_sample_qc(conn, selected_run_id)
-    coverage_df_db = load_target_coverage(conn, selected_run_id)
+    # =========================
+    # LOAD DATA
+    # =========================
+    sample_qc_df = load_qc_samples(selected_run_id)
+    coverage_df_db = load_qc_coverage(selected_run_id)
 
-    conn.close()
-
-    render_run_info(run_info)
     render_sample_qc(sample_qc_df)
 
     if not coverage_df_db.empty:
         render_coverage_module(coverage_df_db)
-    
+
+    # =========================
+    # MANAGE DATABASE
+    # =========================
+    st.markdown("---")
+    st.subheader("Manage Database")
+
+    with st.expander("🗑️ Manage Historical Runs"):
+        if project_runs.empty:
+            st.info("No runs available to delete.")
+        else:
+            delete_options = project_runs[["id", "project_name", "run_date_be", "flow_cell"]].copy()
+
+            delete_options["label"] = delete_options.apply(
+                lambda x: (
+                    f"Run ID {x['id']} | "
+                    f"{x['project_name']} | "
+                    f"{x['run_date_be']} | "
+                    f"{x['flow_cell']}"
+                ),
+                axis=1
+            )
+
+            selected_delete_label = st.selectbox(
+                "Select a run to delete",
+                options=delete_options["label"].tolist(),
+                key="delete_run_selectbox"
+            )
+
+            delete_run_id = int(
+                delete_options.loc[
+                    delete_options["label"] == selected_delete_label, "id"
+                ].iloc[0]
+            )
+
+            cdel1, cdel2 = st.columns(2)
+
+            with cdel1:
+                if st.button("Prepare Delete", type="secondary", key="prepare_delete_btn"):
+                    st.session_state.confirm_delete_run_id = delete_run_id
+
+            with cdel2:
+                if (
+                    st.session_state.confirm_delete_run_id == delete_run_id
+                    and st.button("Confirm Soft Delete", type="primary", key="confirm_delete_btn")
+                ):
+                    try:
+                        soft_delete_qc_run(delete_run_id)
+                        st.success(f"Run ID {delete_run_id} has been deleted.")
+                        st.session_state.confirm_delete_run_id = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to delete run: {e}")
