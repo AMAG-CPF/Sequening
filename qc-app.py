@@ -36,9 +36,27 @@ def get_connection():
         sslmode="require",
     )
 
+def to_python_type(value):
+    if pd.isna(value):
+        return None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
+
+def normalize_record(record: dict) -> dict:
+    return {k: to_python_type(v) for k, v in record.items()}
+
 def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records: list[dict]) -> int:
     conn = get_connection()
     try:
+        run_record = normalize_record(run_record)
+        sample_records = [normalize_record(rec) for rec in sample_records]
+        coverage_records = [normalize_record(rec) for rec in coverage_records]
+
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -86,7 +104,9 @@ def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records
                 run_id = cur.fetchone()[0]
 
                 for rec in sample_records:
-                    rec["run_id"] = run_id
+                    rec["run_id"] = int(run_id)
+                    rec = normalize_record(rec)
+
                     cur.execute(
                         """
                         INSERT INTO ngs_qc_samples (
@@ -126,7 +146,9 @@ def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records
                     )
 
                 for rec in coverage_records:
-                    rec["run_id"] = run_id
+                    rec["run_id"] = int(run_id)
+                    rec = normalize_record(rec)
+
                     cur.execute(
                         """
                         INSERT INTO ngs_qc_target_coverage (
