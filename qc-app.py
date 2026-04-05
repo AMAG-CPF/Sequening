@@ -1080,6 +1080,9 @@ with tab2:
 
     try:
         run_history_df = load_qc_run_history()
+    except Exception as e:
+        st.error(f"Cannot connect to Neon database: {e}")
+        st.stop()
 
     if run_history_df.empty:
         st.warning("No runs found.")
