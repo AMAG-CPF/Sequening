@@ -1,5 +1,6 @@
 from datetime import datetime
 import hmac
+
 import pandas as pd
 import plotly.graph_objects as go
 import psycopg2
@@ -47,163 +48,175 @@ def get_connection():
         dbname=st.secrets["postgres"]["dbname"],
         user=st.secrets["postgres"]["user"],
         password=st.secrets["postgres"]["password"],
-        sslmode="require"  
+        sslmode="require",
     )
+
 
 def insert_run(summary_record: dict, panel_records: list[dict]) -> int:
     conn = get_connection()
-    with conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO sequencing_runs (
-                    run_date,
-                    project_name,
-                    reagent_kit,
-                    reagent_kit_label,
-                    coverage_x,
-                    total_panels,
-                    total_samples,
-                    total_bp_required,
-                    total_gb_required,
-                    capacity_bp,
-                    capacity_gb,
-                    usage_percent,
-                    remaining_bp,
-                    remaining_gb,
-                    reads_required,
-                    reads_required_m,
-                    reads_capacity,
-                    reads_capacity_m,
-                    reads_per_sample,
-                    max_samples,
-                    notes
-                )
-                VALUES (
-                    %(run_date)s,
-                    %(project_name)s,
-                    %(reagent_kit)s,
-                    %(reagent_kit_label)s,
-                    %(coverage_x)s,
-                    %(total_panels)s,
-                    %(total_samples)s,
-                    %(total_bp_required)s,
-                    %(total_gb_required)s,
-                    %(capacity_bp)s,
-                    %(capacity_gb)s,
-                    %(usage_percent)s,
-                    %(remaining_bp)s,
-                    %(remaining_gb)s,
-                    %(reads_required)s,
-                    %(reads_required_m)s,
-                    %(reads_capacity)s,
-                    %(reads_capacity_m)s,
-                    %(reads_per_sample)s,
-                    %(max_samples)s,
-                    %(notes)s
-                )
-                RETURNING id
-                """,
-                summary_record
-            )
-            run_id = cur.fetchone()[0]
-
-            for panel in panel_records:
-                panel["run_id"] = run_id
+    try:
+        with conn:
+            with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO sequencing_run_panels (
-                        run_id,
-                        panel_name,
-                        panel_size_bp,
-                        samples,
+                    INSERT INTO sequencing_runs (
+                        run_date,
+                        project_name,
+                        reagent_kit,
+                        reagent_kit_label,
                         coverage_x,
-                        required_bp,
-                        required_gb
+                        total_panels,
+                        total_samples,
+                        total_bp_required,
+                        total_gb_required,
+                        capacity_bp,
+                        capacity_gb,
+                        usage_percent,
+                        remaining_bp,
+                        remaining_gb,
+                        reads_required,
+                        reads_required_m,
+                        reads_capacity,
+                        reads_capacity_m,
+                        reads_per_sample,
+                        max_samples,
+                        notes
                     )
                     VALUES (
-                        %(run_id)s,
-                        %(panel_name)s,
-                        %(panel_size_bp)s,
-                        %(samples)s,
+                        %(run_date)s,
+                        %(project_name)s,
+                        %(reagent_kit)s,
+                        %(reagent_kit_label)s,
                         %(coverage_x)s,
-                        %(required_bp)s,
-                        %(required_gb)s
+                        %(total_panels)s,
+                        %(total_samples)s,
+                        %(total_bp_required)s,
+                        %(total_gb_required)s,
+                        %(capacity_bp)s,
+                        %(capacity_gb)s,
+                        %(usage_percent)s,
+                        %(remaining_bp)s,
+                        %(remaining_gb)s,
+                        %(reads_required)s,
+                        %(reads_required_m)s,
+                        %(reads_capacity)s,
+                        %(reads_capacity_m)s,
+                        %(reads_per_sample)s,
+                        %(max_samples)s,
+                        %(notes)s
                     )
+                    RETURNING id
                     """,
-                    panel
+                    summary_record
                 )
+                run_id = cur.fetchone()[0]
 
-    return run_id
+                for panel in panel_records:
+                    panel["run_id"] = run_id
+                    cur.execute(
+                        """
+                        INSERT INTO sequencing_run_panels (
+                            run_id,
+                            panel_name,
+                            panel_size_bp,
+                            samples,
+                            coverage_x,
+                            required_bp,
+                            required_gb
+                        )
+                        VALUES (
+                            %(run_id)s,
+                            %(panel_name)s,
+                            %(panel_size_bp)s,
+                            %(samples)s,
+                            %(coverage_x)s,
+                            %(required_bp)s,
+                            %(required_gb)s
+                        )
+                        """,
+                        panel
+                    )
+        return run_id
+    finally:
+        conn.close()
 
 
 def load_run_history(limit=100):
     conn = get_connection()
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT
-                id,
-                project_name,
-                run_date,
-                reagent_kit,
-                coverage_x,
-                total_samples,
-                total_gb_required,
-                usage_percent,
-                reads_required_m,
-                max_samples
-            FROM sequencing_runs
-            WHERE COALESCE(is_deleted, FALSE) = FALSE
-            ORDER BY run_date DESC
-            LIMIT %s
-            """,
-            (limit,)
-        )
-        rows = cur.fetchall()
-    return pd.DataFrame(rows)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    project_name,
+                    run_date,
+                    reagent_kit,
+                    coverage_x,
+                    total_samples,
+                    total_gb_required,
+                    usage_percent,
+                    reads_required_m,
+                    max_samples
+                FROM sequencing_runs
+                WHERE COALESCE(is_deleted, FALSE) = FALSE
+                ORDER BY run_date DESC
+                LIMIT %s
+                """,
+                (limit,)
+            )
+            rows = cur.fetchall()
+        return pd.DataFrame(rows)
+    finally:
+        conn.close()
 
 
 def load_panel_history(limit=500):
     conn = get_connection()
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT
-                r.id AS run_id,
-                r.project_name,
-                r.run_date,
-                r.reagent_kit,
-                r.coverage_x,
-                p.panel_name,
-                p.panel_size_bp,
-                p.samples,
-                p.required_gb
-            FROM sequencing_runs r
-            JOIN sequencing_run_panels p
-              ON r.id = p.run_id
-            WHERE COALESCE(r.is_deleted, FALSE) = FALSE
-            ORDER BY r.run_date DESC, p.id ASC
-            LIMIT %s
-            """,
-            (limit,)
-        )
-        rows = cur.fetchall()
-    return pd.DataFrame(rows)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    r.id AS run_id,
+                    r.project_name,
+                    r.run_date,
+                    r.reagent_kit,
+                    r.coverage_x,
+                    p.panel_name,
+                    p.panel_size_bp,
+                    p.samples,
+                    p.required_gb
+                FROM sequencing_runs r
+                JOIN sequencing_run_panels p
+                  ON r.id = p.run_id
+                WHERE COALESCE(r.is_deleted, FALSE) = FALSE
+                ORDER BY r.run_date DESC, p.id ASC
+                LIMIT %s
+                """,
+                (limit,)
+            )
+            rows = cur.fetchall()
+        return pd.DataFrame(rows)
+    finally:
+        conn.close()
 
 
 def soft_delete_run(run_id: int):
     conn = get_connection()
-    with conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE sequencing_runs
-                SET is_deleted = TRUE
-                WHERE id = %s
-                """,
-                (run_id,)
-            )
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE sequencing_runs
+                    SET is_deleted = TRUE
+                    WHERE id = %s
+                    """,
+                    (run_id,)
+                )
+    finally:
+        conn.close()
 
 
 # =========================
