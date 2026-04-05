@@ -216,8 +216,6 @@ def load_qc_run_history(limit=200):
                     q30_percent,
                     split_rate_percent,
                     density,
-                    expected_targets,
-                    coverage_threshold,
                     created_at
                 FROM ngs_qc_runs
                 WHERE COALESCE(is_deleted, FALSE) = FALSE
@@ -306,6 +304,7 @@ def soft_delete_qc_run(run_id: int):
                 )
     finally:
         conn.close()
+
 # =========================================================
 # Helper functions
 # =========================================================
