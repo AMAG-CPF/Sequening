@@ -1,5 +1,7 @@
 import io
 import re
+import numpy as np
+import pandas as pd
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -289,6 +291,16 @@ def soft_delete_qc_run(run_id: int):
 # =========================================================
 # Helper functions
 # =========================================================
+def to_python_type(value):
+    if pd.isna(value):
+        return None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
 def clean_sample_name(sample: str) -> str:
     sample = str(sample).strip()
     sample = re.sub(r"\.trimmed$", "", sample)
