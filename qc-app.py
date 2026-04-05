@@ -1082,8 +1082,9 @@ with tab2:
         run_history_df = load_qc_run_history()
 
     if run_history_df.empty:
-    st.warning("No runs found.")
-    st.stop()
+        st.warning("No runs found.")
+        st.stop()
+    
 
 # Search
 project_search = st.text_input("Search Project")
