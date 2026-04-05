@@ -75,8 +75,6 @@ def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records
                         q30_percent,
                         split_rate_percent,
                         density,
-                        expected_targets,
-                        coverage_threshold,
                         notes
                     )
                     VALUES (
@@ -93,8 +91,6 @@ def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records
                         %(q30_percent)s,
                         %(split_rate_percent)s,
                         %(density)s,
-                        %(expected_targets)s,
-                        %(coverage_threshold)s,
                         %(notes)s
                     )
                     RETURNING id
