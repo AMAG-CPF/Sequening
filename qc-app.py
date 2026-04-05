@@ -31,7 +31,6 @@ def check_password():
     if st.session_state.get("password_correct", False):
         return
 
-    st.title("🔐 NGS Capacity Planner")
     st.text_input("App Password", type="password", key="password", on_change=password_entered)
 
     if "password" in st.session_state and st.session_state["password"] != "":
