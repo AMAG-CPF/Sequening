@@ -237,19 +237,19 @@ def load_qc_samples(run_id: int):
             cur.execute(
                 """
                 SELECT
-                    sample_name AS "Sample",
-                    raw_reads_before AS "Raw_Reads_Before",
-                    duplication_percent AS "% Duplication",
-                    q30_percent AS "% > Q30",
-                    mb_q30_bases AS "Mb Q30 bases",
-                    gc_content AS "GC content",
-                    adapter_percent AS "% Adapter",
-                    clean_reads_after AS "Clean_Reads_After",
-                    filtering_rate AS "Filtering_Rate",
-                    total_alignments AS "Total_Alignments",
-                    mapped_reads AS "Mapped_Reads",
-                    mapped_reads_percent AS "Mapped_Reads(%)",
-                    qc_status AS "QC_Status"
+                    sample_name AS sample,
+                    raw_reads_before AS raw_reads_before,
+                    duplication_percent AS duplication_percent,
+                    q30_percent AS q30_percent,
+                    mb_q30_bases AS mb_q30_bases,
+                    gc_content AS gc_content,
+                    adapter_percent AS adapter_percent,
+                    clean_reads_after AS clean_reads_after,
+                    filtering_rate AS filtering_rate,
+                    total_alignments AS total_alignments,
+                    mapped_reads AS mapped_reads,
+                    mapped_reads_percent AS mapped_reads_percent,
+                    qc_status AS qc_status
                 FROM ngs_qc_samples
                 WHERE run_id = %s
                 ORDER BY sample_name
@@ -257,7 +257,27 @@ def load_qc_samples(run_id: int):
                 (run_id,)
             )
             rows = cur.fetchall()
-        return pd.DataFrame(rows)
+
+        df = pd.DataFrame(rows)
+
+        if not df.empty:
+            df = df.rename(columns={
+                "sample": "Sample",
+                "raw_reads_before": "Raw_Reads_Before",
+                "duplication_percent": "% Duplication",
+                "q30_percent": "% > Q30",
+                "mb_q30_bases": "Mb Q30 bases",
+                "gc_content": "GC content",
+                "adapter_percent": "% Adapter",
+                "clean_reads_after": "Clean_Reads_After",
+                "filtering_rate": "Filtering_Rate",
+                "total_alignments": "Total_Alignments",
+                "mapped_reads": "Mapped_Reads",
+                "mapped_reads_percent": "Mapped_Reads(%)",
+                "qc_status": "QC_Status",
+            })
+
+        return df
     finally:
         conn.close()
 
