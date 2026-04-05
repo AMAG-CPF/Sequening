@@ -19,26 +19,6 @@ st.title("🧬 NGS QC Dashboard")
 # =========================
 # SECURITY
 # =========================
-def check_password():
-    def password_entered():
-        expected = st.secrets["app"]["password"]
-        entered = st.session_state.get("password", "")
-        st.session_state["password_correct"] = hmac.compare_digest(entered, expected)
-
-    if st.session_state.get("password_correct", False):
-        return
-
-    st.title("🔐 NGS QC Dashboard"")
-    st.text_input("App Password", type="password", key="password", on_change=password_entered)
-
-    if "password" in st.session_state and st.session_state["password"] != "":
-        st.error("Incorrect password")
-
-    st.stop()
-
-
-check_password()
-
 
 # =========================
 # DATABASE
@@ -50,10 +30,261 @@ def get_connection():
         dbname=st.secrets["postgres"]["dbname"],
         user=st.secrets["postgres"]["user"],
         password=st.secrets["postgres"]["password"],
-        sslmode="require"  
+        sslmode="require",
     )
 
+def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records: list[dict]) -> int:
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO ngs_qc_runs (
+                        project_name,
+                        flow_cell,
+                        run_date_be,
+                        software_version,
+                        cycle_number,
+                        read1_length,
+                        read2_length,
+                        index1_length,
+                        index2_length,
+                        total_reads_m,
+                        q30_percent,
+                        split_rate_percent,
+                        density,
+                        expected_targets,
+                        coverage_threshold,
+                        notes
+                    )
+                    VALUES (
+                        %(project_name)s,
+                        %(flow_cell)s,
+                        %(run_date_be)s,
+                        %(software_version)s,
+                        %(cycle_number)s,
+                        %(read1_length)s,
+                        %(read2_length)s,
+                        %(index1_length)s,
+                        %(index2_length)s,
+                        %(total_reads_m)s,
+                        %(q30_percent)s,
+                        %(split_rate_percent)s,
+                        %(density)s,
+                        %(expected_targets)s,
+                        %(coverage_threshold)s,
+                        %(notes)s
+                    )
+                    RETURNING id
+                    """,
+                    run_record
+                )
+                run_id = cur.fetchone()[0]
 
+                for rec in sample_records:
+                    rec["run_id"] = run_id
+                    cur.execute(
+                        """
+                        INSERT INTO ngs_qc_samples (
+                            run_id,
+                            sample_name,
+                            raw_reads_before,
+                            duplication_percent,
+                            q30_percent,
+                            mb_q30_bases,
+                            gc_content,
+                            adapter_percent,
+                            clean_reads_after,
+                            filtering_rate,
+                            total_alignments,
+                            mapped_reads,
+                            mapped_reads_percent,
+                            qc_status
+                        )
+                        VALUES (
+                            %(run_id)s,
+                            %(sample_name)s,
+                            %(raw_reads_before)s,
+                            %(duplication_percent)s,
+                            %(q30_percent)s,
+                            %(mb_q30_bases)s,
+                            %(gc_content)s,
+                            %(adapter_percent)s,
+                            %(clean_reads_after)s,
+                            %(filtering_rate)s,
+                            %(total_alignments)s,
+                            %(mapped_reads)s,
+                            %(mapped_reads_percent)s,
+                            %(qc_status)s
+                        )
+                        """,
+                        rec
+                    )
+
+                for rec in coverage_records:
+                    rec["run_id"] = run_id
+                    cur.execute(
+                        """
+                        INSERT INTO ngs_qc_target_coverage (
+                            run_id,
+                            sample_name,
+                            target_name,
+                            coverage
+                        )
+                        VALUES (
+                            %(run_id)s,
+                            %(sample_name)s,
+                            %(target_name)s,
+                            %(coverage)s
+                        )
+                        """,
+                        rec
+                    )
+
+        return run_id
+    finally:
+        conn.close()
+
+def build_sample_records(df: pd.DataFrame) -> list[dict]:
+    out = []
+    for _, row in df.iterrows():
+        out.append({
+            "sample_name": row["Sample"],
+            "raw_reads_before": float(row["Raw_Reads_Before"]),
+            "duplication_percent": float(row["% Duplication"]),
+            "q30_percent": float(row["% > Q30"]),
+            "mb_q30_bases": float(row["Mb Q30 bases"]),
+            "gc_content": float(row["GC content"]),
+            "adapter_percent": float(row["% Adapter"]),
+            "clean_reads_after": float(row["Clean_Reads_After"]),
+            "filtering_rate": float(row["Filtering_Rate"]),
+            "total_alignments": float(row["Total_Alignments"]),
+            "mapped_reads": float(row["Mapped_Reads"]),
+            "mapped_reads_percent": float(row["Mapped_Reads(%)"]),
+            "qc_status": row["QC_Status"],
+        })
+    return out
+
+def build_coverage_records(coverage_df: pd.DataFrame) -> list[dict]:
+    out = []
+    samples = [c for c in coverage_df.columns if c != "CHR"]
+
+    for _, row in coverage_df.iterrows():
+        target_name = row["CHR"]
+        for sample in samples:
+            out.append({
+                "sample_name": sample,
+                "target_name": target_name,
+                "coverage": float(pd.to_numeric(row[sample], errors="coerce") or 0),
+            })
+    return out
+
+def load_qc_run_history(limit=200):
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    project_name,
+                    flow_cell,
+                    run_date_be,
+                    total_reads_m,
+                    q30_percent,
+                    split_rate_percent,
+                    density,
+                    expected_targets,
+                    coverage_threshold,
+                    created_at
+                FROM ngs_qc_runs
+                WHERE COALESCE(is_deleted, FALSE) = FALSE
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (limit,)
+            )
+            rows = cur.fetchall()
+        return pd.DataFrame(rows)
+    finally:
+        conn.close()
+def load_qc_samples(run_id: int):
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    sample_name AS "Sample",
+                    raw_reads_before AS "Raw_Reads_Before",
+                    duplication_percent AS "% Duplication",
+                    q30_percent AS "% > Q30",
+                    mb_q30_bases AS "Mb Q30 bases",
+                    gc_content AS "GC content",
+                    adapter_percent AS "% Adapter",
+                    clean_reads_after AS "Clean_Reads_After",
+                    filtering_rate AS "Filtering_Rate",
+                    total_alignments AS "Total_Alignments",
+                    mapped_reads AS "Mapped_Reads",
+                    mapped_reads_percent AS "Mapped_Reads(%)",
+                    qc_status AS "QC_Status"
+                FROM ngs_qc_samples
+                WHERE run_id = %s
+                ORDER BY sample_name
+                """,
+                (run_id,)
+            )
+            rows = cur.fetchall()
+        return pd.DataFrame(rows)
+    finally:
+        conn.close()
+
+def load_qc_coverage(run_id: int):
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT sample_name, target_name, coverage
+                FROM ngs_qc_target_coverage
+                WHERE run_id = %s
+                ORDER BY target_name, sample_name
+                """,
+                (run_id,)
+            )
+            rows = cur.fetchall()
+
+        long_df = pd.DataFrame(rows)
+        if long_df.empty:
+            return pd.DataFrame()
+
+        wide_df = long_df.pivot(
+            index="target_name",
+            columns="sample_name",
+            values="coverage"
+        ).reset_index()
+
+        wide_df = wide_df.rename(columns={"target_name": "CHR"})
+        return wide_df
+    finally:
+        conn.close()
+
+def soft_delete_qc_run(run_id: int):
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ngs_qc_runs
+                    SET is_deleted = TRUE
+                    WHERE id = %s
+                    """,
+                    (run_id,)
+                )
+    finally:
+        conn.close()
 # =========================================================
 # Helper functions
 # =========================================================
@@ -901,3 +1132,35 @@ with tab2:
 
     if not coverage_df_db.empty:
         render_coverage_module(coverage_df_db)
+    
+# =========================
+# SAVE CURRENT RUN
+# =========================
+if st.button("Save Current QC Run to Neon", type="primary"):
+    try:
+        run_record = {
+            "project_name": project_name_input,
+            "flow_cell": flow_cell_input,
+            "run_date_be": run_date_input,
+            "software_version": run_info.get("Software Version"),
+            "cycle_number": pd.to_numeric(run_info.get("CycleNumber"), errors="coerce"),
+            "read1_length": pd.to_numeric(run_info.get("Read1 Length"), errors="coerce"),
+            "read2_length": pd.to_numeric(run_info.get("Read2 Length"), errors="coerce"),
+            "index1_length": pd.to_numeric(run_info.get("Index1 Length"), errors="coerce"),
+            "index2_length": pd.to_numeric(run_info.get("Index2 Length"), errors="coerce"),
+            "total_reads_m": pd.to_numeric(run_info.get("TotalReads(M)"), errors="coerce"),
+            "q30_percent": pd.to_numeric(run_info.get("Q30(%)"), errors="coerce"),
+            "split_rate_percent": pd.to_numeric(run_info.get("SplitRate(%)"), errors="coerce"),
+            "density": pd.to_numeric(run_info.get("Density(um²)"), errors="coerce"),
+            "expected_targets": int(expected_targets),
+            "coverage_threshold": int(threshold),
+            "notes": "",
+        }
+
+        sample_records = build_sample_records(df)
+        coverage_records = build_coverage_records(coverage_df) if coverage_df is not None else []
+
+        run_id = insert_qc_run(run_record, sample_records, coverage_records)
+        st.success(f"QC run saved successfully. Run ID = {run_id}")
+    except Exception as e:
+        st.error(f"Failed to save QC run: {e}")
