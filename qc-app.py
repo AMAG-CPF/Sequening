@@ -19,16 +19,41 @@ st.set_page_config(page_title="NGS QC App", layout="wide")
 st.title("NGS QC Dashboard")
 
 
-# =========================================================
-# CONNECTION
-# =========================================================
+# =========================
+# SECURITY
+# =========================
+def check_password():
+    def password_entered():
+        expected = st.secrets["app"]["password"]
+        entered = st.session_state.get("password", "")
+        st.session_state["password_correct"] = hmac.compare_digest(entered, expected)
+
+    if st.session_state.get("password_correct", False):
+        return
+
+    st.title("🔐 NGS Capacity Planner")
+    st.text_input("App Password", type="password", key="password", on_change=password_entered)
+
+    if "password" in st.session_state and st.session_state["password"] != "":
+        st.error("Incorrect password")
+
+    st.stop()
+
+
+check_password()
+
+
+# =========================
+# DATABASE
+# =========================
 def get_connection():
-    # ใช้แบบที่คุณตั้ง env / secrets อยู่จริง
-    # ตัวอย่าง:
-    # return psycopg2.connect(st.secrets["DATABASE_URL"])
     return psycopg2.connect(
-        st.secrets["DATABASE_URL"],
-        sslmode="require"
+        host=st.secrets["postgres"]["host"],
+        port=st.secrets["postgres"]["port"],
+        dbname=st.secrets["postgres"]["dbname"],
+        user=st.secrets["postgres"]["user"],
+        password=st.secrets["postgres"]["password"],
+        sslmode="require",
     )
 
 
@@ -344,7 +369,6 @@ def soft_delete_qc_run(run_id: int):
 
 # =========================================================
 # DATABASE READ FUNCTIONS
-# ต้องอยู่ก่อน tab1/tab2
 # =========================================================
 def load_qc_run_history(limit=200):
     conn = get_connection()
@@ -786,7 +810,6 @@ with tab1:
 
 # =========================================================
 # TAB 2: Browse Neon Database
-# ต้องมีแค่ block เดียว
 # =========================================================
 with tab2:
     st.subheader("Project Selection")
