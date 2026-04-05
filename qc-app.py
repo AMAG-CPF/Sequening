@@ -1,7 +1,8 @@
 import io
 import re
 from datetime import datetime
-
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
@@ -1059,6 +1060,8 @@ if st.button("Save Current QC Run to Neon", type="primary"):
             "q30_percent": pd.to_numeric(run_info.get("Q30(%)"), errors="coerce"),
             "split_rate_percent": pd.to_numeric(run_info.get("SplitRate(%)"), errors="coerce"),
             "density": pd.to_numeric(run_info.get("Density(um²)"), errors="coerce"),
+            "expected_targets": int(expected_targets),
+            "coverage_threshold": int(threshold),
             "notes": "",
         }
 
