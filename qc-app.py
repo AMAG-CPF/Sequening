@@ -1,7 +1,7 @@
 import io
 import re
 import numpy as np
-import pandas as pd
+import hmac
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -22,6 +22,24 @@ st.title("🧬 NGS QC Dashboard")
 # =========================
 # SECURITY
 # =========================
+def check_password():
+    def password_entered():
+        expected = st.secrets["app"]["password"]
+        entered = st.session_state.get("password", "")
+        st.session_state["password_correct"] = hmac.compare_digest(entered, expected)
+
+    if st.session_state.get("password_correct", False):
+        return
+
+    st.text_input("App Password", type="password", key="password", on_change=password_entered)
+
+    if "password" in st.session_state and st.session_state["password"] != "":
+        st.error("Incorrect password")
+
+    st.stop()
+
+
+check_password()
 
 # =========================
 # DATABASE
@@ -35,20 +53,6 @@ def get_connection():
         password=st.secrets["postgres"]["password"],
         sslmode="require",
     )
-
-def to_python_type(value):
-    if pd.isna(value):
-        return None
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.floating):
-        return float(value)
-    if isinstance(value, np.bool_):
-        return bool(value)
-    return value
-
-def normalize_record(record: dict) -> dict:
-    return {k: to_python_type(v) for k, v in record.items()}
 
 def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records: list[dict]) -> int:
     conn = get_connection()
@@ -102,7 +106,6 @@ def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records
                 for rec in sample_records:
                     rec["run_id"] = int(run_id)
                     rec = normalize_record(rec)
-
                     cur.execute(
                         """
                         INSERT INTO ngs_qc_samples (
@@ -144,7 +147,6 @@ def insert_qc_run(run_record: dict, sample_records: list[dict], coverage_records
                 for rec in coverage_records:
                     rec["run_id"] = int(run_id)
                     rec = normalize_record(rec)
-
                     cur.execute(
                         """
                         INSERT INTO ngs_qc_target_coverage (
@@ -304,10 +306,10 @@ def soft_delete_qc_run(run_id: int):
                 )
     finally:
         conn.close()
-
 # =========================================================
 # Helper functions
 # =========================================================
+
 def to_python_type(value):
     if pd.isna(value):
         return None
@@ -318,6 +320,10 @@ def to_python_type(value):
     if isinstance(value, np.bool_):
         return bool(value)
     return value
+
+def normalize_record(record: dict) -> dict:
+    return {k: to_python_type(v) for k, v in record.items()}
+
 def clean_sample_name(sample: str) -> str:
     sample = str(sample).strip()
     sample = re.sub(r"\.trimmed$", "", sample)
@@ -486,56 +492,46 @@ def make_pdf_report(df_report: pd.DataFrame, project_name: str) -> io.BytesIO:
     buffer.seek(0)
     return buffer
 
-
 # =========================================================
 # Database functions
 # =========================================================
-def load_projects(engine) -> pd.DataFrame:
+def load_projects(conn):
     query = """
         SELECT DISTINCT project_name
-        FROM runs
+        FROM ngs_qc_runs
         WHERE project_name IS NOT NULL
+          AND COALESCE(is_deleted, FALSE) = FALSE
         ORDER BY project_name
     """
-    return pd.read_sql(query, engine)
+    return pd.read_sql(query, conn)
 
 
-def load_runs_by_project(engine, project_name: str) -> pd.DataFrame:
-    query = text("""
-        SELECT id, project_name, flow_cell, run_date_be, created_at
-        FROM runs
-        WHERE project_name = :project_name
-        ORDER BY created_at DESC
-    """)
-    return pd.read_sql(query, engine, params={"project_name": project_name})
-
-
-def load_sample_qc(engine, run_id: int) -> pd.DataFrame:
-    query = text("""
+def load_runs_by_project(conn, project_name):
+    query = """
         SELECT
-            sample_name AS "Sample",
-            raw_reads_before AS "Raw_Reads_Before",
-            duplication_percent AS "% Duplication",
-            q30_percent AS "% > Q30",
-            mb_q30_bases AS "Mb Q30 bases",
-            gc_content AS "GC content",
-            adapter_percent AS "% Adapter",
-            clean_reads_after AS "Clean_Reads_After",
-            filtering_rate AS "Filtering_Rate",
-            total_alignments AS "Total_Alignments",
-            mapped_reads AS "Mapped_Reads",
-            mapped_reads_percent AS "Mapped_Reads(%)",
-            qc_status AS "QC_Status"
-        FROM sample_qc
-        WHERE run_id = :run_id
-        ORDER BY sample_name
-    """)
-    return pd.read_sql(query, engine, params={"run_id": run_id})
+            id,
+            flow_cell,
+            run_date_be,
+            software_version,
+            cycle_number,
+            total_reads_m,
+            q30_percent,
+            split_rate_percent,
+            density,
+            notes,
+            created_at
+        FROM ngs_qc_runs
+        WHERE project_name = %s
+          AND COALESCE(is_deleted, FALSE) = FALSE
+        ORDER BY id DESC
+    """
+    return pd.read_sql(query, conn, params=(project_name,))
 
-
-def load_run_info(engine, run_id: int) -> dict:
-    query = text("""
+def load_run_info(conn, run_id):
+    query = """
         SELECT
+            id,
+            created_at,
             project_name,
             flow_cell,
             run_date_be,
@@ -548,11 +544,13 @@ def load_run_info(engine, run_id: int) -> dict:
             total_reads_m,
             q30_percent,
             split_rate_percent,
-            density
-        FROM runs
-        WHERE id = :run_id
-    """)
-    df = pd.read_sql(query, engine, params={"run_id": run_id})
+            density,
+            notes
+        FROM ngs_qc_runs
+        WHERE id = %s
+    """
+
+    df = pd.read_sql(query, conn, params=(run_id,))
     if df.empty:
         return {}
 
@@ -571,101 +569,72 @@ def load_run_info(engine, run_id: int) -> dict:
         "Q30(%)": row.get("q30_percent", "NA"),
         "SplitRate(%)": row.get("split_rate_percent", "NA"),
         "Density(um²)": row.get("density", "NA"),
+        "Notes": row.get("notes", ""),
     }
 
 
-def load_target_coverage(engine, run_id: int) -> pd.DataFrame:
-    query = text("""
-        SELECT target_name AS "CHR", sample_name, coverage
-        FROM target_coverage
-        WHERE run_id = :run_id
-    """)
-    long_df = pd.read_sql(query, engine, params={"run_id": run_id})
+def load_sample_qc(conn, run_id):
+    query = """
+        SELECT
+            sample_name AS sample,
+            raw_reads_before AS raw_reads_before,
+            duplication_percent AS duplication_percent,
+            q30_percent AS q30_percent,
+            mb_q30_bases AS mb_q30_bases,
+            gc_content AS gc_content,
+            adapter_percent AS adapter_percent,
+            clean_reads_after AS clean_reads_after,
+            filtering_rate AS filtering_rate,
+            total_alignments AS total_alignments,
+            mapped_reads AS mapped_reads,
+            mapped_reads_percent AS mapped_reads_percent,
+            qc_status AS qc_status
+        FROM ngs_qc_samples
+        WHERE run_id = %s
+        ORDER BY sample_name
+    """
+    df = pd.read_sql(query, conn, params=(run_id,))
+
+    return df.rename(columns={
+        "sample": "Sample",
+        "raw_reads_before": "Raw_Reads_Before",
+        "duplication_percent": "% Duplication",
+        "q30_percent": "% > Q30",
+        "mb_q30_bases": "Mb Q30 bases",
+        "gc_content": "GC content",
+        "adapter_percent": "% Adapter",
+        "clean_reads_after": "Clean_Reads_After",
+        "filtering_rate": "Filtering_Rate",
+        "total_alignments": "Total_Alignments",
+        "mapped_reads": "Mapped_Reads",
+        "mapped_reads_percent": "Mapped_Reads(%)",
+        "qc_status": "QC_Status",
+    })
+
+
+def load_target_coverage(conn, run_id):
+    query = """
+        SELECT
+            sample_name,
+            target_name,
+            coverage
+        FROM ngs_qc_target_coverage
+        WHERE run_id = %s
+        ORDER BY sample_name, target_name
+    """
+    long_df = pd.read_sql(query, conn, params=(run_id,))
     if long_df.empty:
         return pd.DataFrame()
 
-    wide_df = long_df.pivot(index="CHR", columns="sample_name", values="coverage").reset_index()
+    wide_df = long_df.pivot(
+        index="target_name",
+        columns="sample_name",
+        values="coverage"
+    ).reset_index()
+
+    wide_df = wide_df.rename(columns={"target_name": "CHR"})
     wide_df.columns.name = None
     return wide_df
-
-
-def save_run(engine, run_info: dict):
-    query = text("""
-        INSERT INTO runs (
-            project_name, flow_cell, run_date_be,
-            software_version, cycle_number,
-            read1_length, read2_length,
-            index1_length, index2_length,
-            total_reads_m, q30_percent, split_rate_percent, density
-        )
-        VALUES (
-            :project_name, :flow_cell, :run_date_be,
-            :software_version, :cycle_number,
-            :read1_length, :read2_length,
-            :index1_length, :index2_length,
-            :total_reads_m, :q30_percent, :split_rate_percent, :density
-        )
-        RETURNING id
-    """)
-    with engine.begin() as conn:
-        run_id = conn.execute(query, {
-            "project_name": run_info.get("Project"),
-            "flow_cell": run_info.get("Flow Cell"),
-            "run_date_be": run_info.get("Run Date"),
-            "software_version": run_info.get("Software Version"),
-            "cycle_number": pd.to_numeric(run_info.get("CycleNumber"), errors="coerce"),
-            "read1_length": pd.to_numeric(run_info.get("Read1 Length"), errors="coerce"),
-            "read2_length": pd.to_numeric(run_info.get("Read2 Length"), errors="coerce"),
-            "index1_length": pd.to_numeric(run_info.get("Index1 Length"), errors="coerce"),
-            "index2_length": pd.to_numeric(run_info.get("Index2 Length"), errors="coerce"),
-            "total_reads_m": pd.to_numeric(run_info.get("TotalReads(M)"), errors="coerce"),
-            "q30_percent": pd.to_numeric(run_info.get("Q30(%)"), errors="coerce"),
-            "split_rate_percent": pd.to_numeric(run_info.get("SplitRate(%)"), errors="coerce"),
-            "density": pd.to_numeric(run_info.get("Density(um²)"), errors="coerce"),
-        }).scalar()
-    return run_id
-
-
-def save_sample_qc(engine, run_id: int, df: pd.DataFrame):
-    df_to_save = df.copy()
-    df_to_save["run_id"] = run_id
-
-    df_to_save = df_to_save.rename(columns={
-        "Sample": "sample_name",
-        "Raw_Reads_Before": "raw_reads_before",
-        "% Duplication": "duplication_percent",
-        "% > Q30": "q30_percent",
-        "Mb Q30 bases": "mb_q30_bases",
-        "GC content": "gc_content",
-        "% Adapter": "adapter_percent",
-        "Clean_Reads_After": "clean_reads_after",
-        "Filtering_Rate": "filtering_rate",
-        "Total_Alignments": "total_alignments",
-        "Mapped_Reads": "mapped_reads",
-        "Mapped_Reads(%)": "mapped_reads_percent",
-        "QC_Status": "qc_status"
-    })
-
-    cols = [
-        "run_id", "sample_name", "raw_reads_before", "duplication_percent",
-        "q30_percent", "mb_q30_bases", "gc_content", "adapter_percent",
-        "clean_reads_after", "filtering_rate", "total_alignments",
-        "mapped_reads", "mapped_reads_percent", "qc_status"
-    ]
-
-    df_to_save[cols].to_sql("sample_qc", engine, if_exists="append", index=False)
-
-
-def save_target_coverage(engine, run_id: int, coverage_df: pd.DataFrame):
-    long_df = coverage_df.melt(id_vars=["CHR"], var_name="sample_name", value_name="coverage")
-    long_df["run_id"] = run_id
-    long_df = long_df.rename(columns={"CHR": "target_name"})
-    long_df["coverage"] = pd.to_numeric(long_df["coverage"], errors="coerce")
-
-    long_df[["run_id", "sample_name", "target_name", "coverage"]].to_sql(
-        "target_coverage", engine, if_exists="append", index=False
-    )
-
 
 # =========================================================
 # Reusable render functions
@@ -1033,6 +1002,39 @@ with tab1:
             coverage_df = pd.read_csv(coverage_file, sep="\t")
             render_coverage_module(coverage_df)
 
+# =========================
+# SAVE CURRENT RUN
+# =========================
+st.subheader("Save to PostgreSQL")
+
+if st.button("Save Current QC Run to PostgreSQL", type="primary"):
+    try:
+        run_record = normalize_record({
+            "project_name": project_name_input,
+            "flow_cell": flow_cell_input or "NA",
+            "run_date_be": run_date_input or "NA",
+            "software_version": run_info.get("Software Version"),
+            "cycle_number": pd.to_numeric(run_info.get("CycleNumber"), errors="coerce"),
+            "read1_length": pd.to_numeric(run_info.get("Read1 Length"), errors="coerce"),
+            "read2_length": pd.to_numeric(run_info.get("Read2 Length"), errors="coerce"),
+            "index1_length": pd.to_numeric(run_info.get("Index1 Length"), errors="coerce"),
+            "index2_length": pd.to_numeric(run_info.get("Index2 Length"), errors="coerce"),
+            "total_reads_m": pd.to_numeric(run_info.get("TotalReads(M)"), errors="coerce"),
+            "q30_percent": pd.to_numeric(run_info.get("Q30(%)"), errors="coerce"),
+            "split_rate_percent": pd.to_numeric(run_info.get("SplitRate(%)"), errors="coerce"),
+            "density": pd.to_numeric(run_info.get("Density(um²)"), errors="coerce"),
+            "notes": "",
+        })
+
+        sample_records = build_sample_records(df)
+        coverage_records = build_coverage_records(coverage_df) if coverage_df is not None else []
+
+        run_id = insert_qc_run(run_record, sample_records, coverage_records)
+        st.success(f"QC run saved successfully. Run ID = {run_id}")
+
+    except Exception as e:
+        st.error(f"Failed to save QC run: {e}")
+
         st.subheader("Export QC Report")
 
         csv_filename = f"{project_name_input}_{date_str}_qc_report.csv"
@@ -1070,90 +1072,83 @@ with tab1:
             mime="application/pdf",
         )
 
-# =========================
-# SAVE CURRENT RUN
-# =========================
-if st.button("Save Current QC Run to Neon", type="primary"):
-    try:
-        run_record = {
-            "project_name": project_name_input,
-            "flow_cell": flow_cell_input,
-            "run_date_be": run_date_input,
-            "software_version": run_info.get("Software Version"),
-            "cycle_number": pd.to_numeric(run_info.get("CycleNumber"), errors="coerce"),
-            "read1_length": pd.to_numeric(run_info.get("Read1 Length"), errors="coerce"),
-            "read2_length": pd.to_numeric(run_info.get("Read2 Length"), errors="coerce"),
-            "index1_length": pd.to_numeric(run_info.get("Index1 Length"), errors="coerce"),
-            "index2_length": pd.to_numeric(run_info.get("Index2 Length"), errors="coerce"),
-            "total_reads_m": pd.to_numeric(run_info.get("TotalReads(M)"), errors="coerce"),
-            "q30_percent": pd.to_numeric(run_info.get("Q30(%)"), errors="coerce"),
-            "split_rate_percent": pd.to_numeric(run_info.get("SplitRate(%)"), errors="coerce"),
-            "density": pd.to_numeric(run_info.get("Density(um²)"), errors="coerce"),
-            "notes": "",
-        }
-
-        sample_records = build_sample_records(df)
-        coverage_records = build_coverage_records(coverage_df) if coverage_df is not None else []
-
-        run_id = insert_qc_run(run_record, sample_records, coverage_records)
-        st.success(f"QC run saved successfully. Run ID = {run_id}")
-    except Exception as e:
-        st.error(f"Failed to save QC run: {e}")
 
 # =========================================================
-# TAB 2: Browse Neon Database
+# TAB 2: Browse Database
 # =========================================================
 with tab2:
     st.subheader("Project Selection")
 
     try:
-        run_history_df = load_qc_run_history()
+        conn = get_connection()
+        project_df = load_projects(conn)
     except Exception as e:
-        st.error(f"Cannot connect to Neon database: {e}")
+        st.error(f"Cannot connect to PostgreSQL database: {e}")
         st.stop()
 
-    if run_history_df.empty:
-        st.warning("No runs found.")
+    s1, s2 = st.columns([3, 1])
+    with s1:
+        project_search = st.text_input("Search Project", value="")
+    with s2:
+        search_clicked = st.button("Search")
+
+    if search_clicked:
+        st.session_state["project_search_value"] = project_search
+
+    search_value = st.session_state.get("project_search_value", project_search)
+
+    if search_value.strip():
+        filtered_projects = project_df[
+            project_df["project_name"].str.contains(search_value, case=False, na=False)
+        ].copy()
+    else:
+        filtered_projects = project_df.copy()
+
+    project_options = filtered_projects["project_name"].dropna().tolist()
+
+    if len(project_options) == 0:
+        st.warning("No matching project found.")
+        conn.close()
         st.stop()
+
+    selected_project = st.selectbox(
+        "Select Project",
+        project_options,
+        key="db_selected_project"
+    )
+
+    run_df = load_runs_by_project(conn, selected_project)
+
+    if run_df.empty:
+        st.warning("No runs found for this project.")
+        conn.close()
+        st.stop()
+
+    run_df["run_label"] = (
+        run_df["flow_cell"].fillna("NA").astype(str) + " | " +
+        run_df["run_date_be"].fillna("NA").astype(str) + " | Run ID: " +
+        run_df["id"].astype(str)
+    )
+
+    selected_run_label = st.selectbox(
+        "Select Run",
+        run_df["run_label"].tolist(),
+        key="db_selected_run"
+    )
+
+    selected_run_id = int(
+        run_df.loc[run_df["run_label"] == selected_run_label, "id"].iloc[0]
+    )
+
+    run_info = load_run_info(conn, selected_run_id)
+    sample_qc_df = load_sample_qc(conn, selected_run_id)
+    coverage_df_db = load_target_coverage(conn, selected_run_id)
+
+    conn.close()
+
+    render_run_info(run_info)
+    render_sample_qc(sample_qc_df)
+
+    if not coverage_df_db.empty:
+        render_coverage_module(coverage_df_db)
     
-
-# Search
-project_search = st.text_input("Search Project")
-
-if project_search:
-    run_history_df = run_history_df[
-        run_history_df["project_name"].str.contains(project_search, case=False, na=False)
-    ]
-
-project_options = run_history_df["project_name"].dropna().unique().tolist()
-
-selected_project = st.selectbox("Select Project", project_options)
-
-# filter runs
-project_runs = run_history_df[
-    run_history_df["project_name"] == selected_project
-]
-
-project_runs["run_label"] = (
-    project_runs["flow_cell"].fillna("NA") + " | " +
-    project_runs["run_date_be"].fillna("NA") + " | Run ID: " +
-    project_runs["id"].astype(str)
-)
-
-selected_run_label = st.selectbox("Select Run", project_runs["run_label"])
-
-selected_run_id = int(
-    project_runs.loc[
-        project_runs["run_label"] == selected_run_label, "id"
-    ].iloc[0]
-)
-
-# load data
-run_info = {}  # optional (ถ้ายังไม่ได้แยก function)
-sample_qc_df = load_qc_samples(selected_run_id)
-coverage_df_db = load_qc_coverage(selected_run_id)
-
-render_sample_qc(sample_qc_df)
-
-if not coverage_df_db.empty:
-    render_coverage_module(coverage_df_db)
