@@ -1153,9 +1153,11 @@ with tab2:
     # =========================
     # LOAD DATA
     # =========================
+    run_qc_df = load_qc_run_history(selected_run_id)
     sample_qc_df = load_qc_samples(selected_run_id)
     coverage_df_db = load_qc_coverage(selected_run_id)
 
+    render_sample_qc(run_qc_df)
     render_sample_qc(sample_qc_df)
 
     if not coverage_df_db.empty:
