@@ -1153,15 +1153,20 @@ with tab2:
     # =========================
     # LOAD DATA
     # =========================
-    run_qc_df = load_qc_run_history(selected_run_id)
+    run_info = load_qc_run_info(selected_run_id)
     sample_qc_df = load_qc_samples(selected_run_id)
     coverage_df_db = load_qc_coverage(selected_run_id)
 
-    render_sample_qc(run_qc_df)
+    render_run_info(run_info)
     render_sample_qc(sample_qc_df)
-
+    
     if not coverage_df_db.empty:
-        render_coverage_module(coverage_df_db)
+        render_coverage_module(
+            coverage_df_db,
+            expected_targets_default=run_info.get("Expected Targets"),
+            threshold_default=run_info.get("Coverage Threshold") or 100,
+            key_prefix="db_cov"
+        )
 
     # =========================
     # MANAGE DATABASE
