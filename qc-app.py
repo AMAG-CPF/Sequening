@@ -1094,7 +1094,7 @@ if st.button("Save Current QC Run to PostgreSQL", type="primary"):
 
 
 # =========================================================
-# TAB 2: Browse Database
+# TAB 2: Browse Neon Database
 # =========================================================
 with tab2:
     st.subheader("Project Selection")
@@ -1109,40 +1109,49 @@ with tab2:
         st.warning("No runs found.")
         st.stop()
 
-    # init session state
     if "confirm_delete_run_id" not in st.session_state:
         st.session_state.confirm_delete_run_id = None
 
-    # =========================
-    # SEARCH + SELECT PROJECT
-    # =========================
-    project_search = st.text_input("Search Project")
+    project_search = st.text_input("Search Project", key="project_search_tab2").strip()
 
     filtered_history_df = run_history_df.copy()
     if project_search:
         filtered_history_df = filtered_history_df[
-            filtered_history_df["project_name"].str.contains(project_search, case=False, na=False)
+            filtered_history_df["project_name"].astype(str).str.contains(project_search, case=False, na=False)
         ]
 
-    project_options = filtered_history_df["project_name"].dropna().unique().tolist()
+    project_options = filtered_history_df["project_name"].dropna().astype(str).unique().tolist()
 
     if not project_options:
         st.warning("No matching projects found.")
         st.stop()
 
-    selected_project = st.selectbox("Select Project", project_options)
-
-    project_runs = filtered_history_df[
-        filtered_history_df["project_name"] == selected_project
-    ].copy()
-
-    project_runs["run_label"] = (
-        project_runs["flow_cell"].fillna("NA").astype(str) + " | " +
-        project_runs["run_date_be"].fillna("NA").astype(str) + " | Run ID: " +
-        project_runs["id"].astype(str)
+    selected_project = st.selectbox(
+        "Select Project",
+        project_options,
+        key="selected_project_tab2"
     )
 
-    selected_run_label = st.selectbox("Select Run", project_runs["run_label"])
+    project_runs = filtered_history_df[
+        filtered_history_df["project_name"].astype(str) == str(selected_project)
+    ].copy()
+
+    if project_runs.empty:
+        st.warning("No runs found for selected project.")
+        st.stop()
+
+    project_runs["run_label"] = project_runs.apply(
+        lambda x: f"{str(x['flow_cell']) if pd.notna(x['flow_cell']) else 'NA'} | "
+                  f"{str(x['run_date_be']) if pd.notna(x['run_date_be']) else 'NA'} | "
+                  f"Run ID: {int(x['id'])}",
+        axis=1
+    )
+
+    selected_run_label = st.selectbox(
+        "Select Run",
+        project_runs["run_label"].tolist(),
+        key="selected_run_label_tab2"
+    )
 
     selected_run_id = int(
         project_runs.loc[
@@ -1150,73 +1159,76 @@ with tab2:
         ].iloc[0]
     )
 
-    # =========================
-    # LOAD DATA
-    # =========================
-    run_info = load_qc_run_info(selected_run_id)
-    sample_qc_df = load_qc_samples(selected_run_id)
-    coverage_df_db = load_qc_coverage(selected_run_id)
+    try:
+        conn = get_connection()
+        try:
+            run_info = load_run_info(conn, selected_run_id)
+            sample_qc_df = load_sample_qc(conn, selected_run_id)
+            coverage_df_db = load_target_coverage(conn, selected_run_id)
+        finally:
+            conn.close()
+    except Exception as e:
+        st.error(f"Failed to load run data: {e}")
+        st.stop()
+
+    st.markdown("---")
+    st.subheader(f"Selected Run: {selected_run_id}")
 
     render_run_info(run_info)
-    render_sample_qc(sample_qc_df)
-    
-    if not coverage_df_db.empty:
-        render_coverage_module(
-            coverage_df_db,
-            expected_targets_default=run_info.get("Expected Targets"),
-            threshold_default=run_info.get("Coverage Threshold") or 100,
-            key_prefix="db_cov"
-        )
 
-    # =========================
-    # MANAGE DATABASE
-    # =========================
+    if sample_qc_df is not None and not sample_qc_df.empty:
+        render_sample_qc(sample_qc_df)
+    else:
+        st.info("No sample QC data found for this run.")
+
+    if coverage_df_db is not None and not coverage_df_db.empty:
+        render_coverage_module(coverage_df_db)
+    else:
+        st.info("No target coverage data found for this run.")
+
     st.markdown("---")
     st.subheader("Manage Database")
 
     with st.expander("🗑️ Manage Historical Runs"):
-        if project_runs.empty:
-            st.info("No runs available to delete.")
-        else:
-            delete_options = project_runs[["id", "project_name", "run_date_be", "flow_cell"]].copy()
+        delete_options = project_runs[["id", "project_name", "run_date_be", "flow_cell"]].copy()
 
-            delete_options["label"] = delete_options.apply(
-                lambda x: (
-                    f"Run ID {x['id']} | "
-                    f"{x['project_name']} | "
-                    f"{x['run_date_be']} | "
-                    f"{x['flow_cell']}"
-                ),
-                axis=1
-            )
+        delete_options["label"] = delete_options.apply(
+            lambda x: (
+                f"Run ID {int(x['id'])} | "
+                f"{x['project_name']} | "
+                f"{x['run_date_be']} | "
+                f"{x['flow_cell']}"
+            ),
+            axis=1
+        )
 
-            selected_delete_label = st.selectbox(
-                "Select a run to delete",
-                options=delete_options["label"].tolist(),
-                key="delete_run_selectbox"
-            )
+        selected_delete_label = st.selectbox(
+            "Select a run to delete",
+            options=delete_options["label"].tolist(),
+            key="delete_run_selectbox"
+        )
 
-            delete_run_id = int(
-                delete_options.loc[
-                    delete_options["label"] == selected_delete_label, "id"
-                ].iloc[0]
-            )
+        delete_run_id = int(
+            delete_options.loc[
+                delete_options["label"] == selected_delete_label, "id"
+            ].iloc[0]
+        )
 
-            cdel1, cdel2 = st.columns(2)
+        cdel1, cdel2 = st.columns(2)
 
-            with cdel1:
-                if st.button("Prepare Delete", type="secondary", key="prepare_delete_btn"):
-                    st.session_state.confirm_delete_run_id = delete_run_id
+        with cdel1:
+            if st.button("Prepare Delete", type="secondary", key="prepare_delete_btn"):
+                st.session_state.confirm_delete_run_id = delete_run_id
 
-            with cdel2:
-                if (
-                    st.session_state.confirm_delete_run_id == delete_run_id
-                    and st.button("Confirm Soft Delete", type="primary", key="confirm_delete_btn")
-                ):
-                    try:
-                        soft_delete_qc_run(delete_run_id)
-                        st.success(f"Run ID {delete_run_id} has been deleted.")
-                        st.session_state.confirm_delete_run_id = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to delete run: {e}")
+        with cdel2:
+            if (
+                st.session_state.confirm_delete_run_id == delete_run_id
+                and st.button("Confirm Soft Delete", type="primary", key="confirm_delete_btn")
+            ):
+                try:
+                    soft_delete_qc_run(delete_run_id)
+                    st.success(f"Run ID {delete_run_id} has been deleted.")
+                    st.session_state.confirm_delete_run_id = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to delete run: {e}")
